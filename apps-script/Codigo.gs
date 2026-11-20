@@ -35,7 +35,10 @@ function doGet(e) {
   const config = { consumoKmL: Number(cfg[0]) || 10, antecedenciaKm: Number(cfg[1]) || 20,
                    valorPadrao: 180, lembreteInicio: cfg[4] || '08:00', lembreteFim: cfg[5] || '17:00' };
   config.valorPadrao = Number(config_().getRange('B5').getValue()) || 180;
-  return json_({ ok: true, veiculos, tecnicos, config });
+  const tecnico = e.parameter.tecnico || '';
+  const placa = e.parameter.placa || '';
+  const hoje = tecnico && placa ? resumoDia_(tecnico, placa, new Date()) : null;
+  return json_({ ok: true, veiculos, tecnicos, config, hoje });
 }
 
 /**
@@ -63,7 +66,8 @@ function doPost(e) {
       const litros = Number(d.litros) || '';
       const kmCoube = Number(d.kmCoube) || (litros ? Math.round(litros * consumo) : '');
       if (!kmCoube) return json_({ ok: false, erro: 'Informe os km que couberam no tanque ou os litros' });
-      ss.getSheetByName(ABA.ABASTECIMENTOS).appendRow([agora, d.tecnico, d.placa, km, Number(d.valor) || '', litros, kmCoube, foto]);
+      const fotoPainel = d.fotoPainelBase64 ? salvarFoto_(d.fotoPainelBase64, d.placa + '_painel', agora) : '';
+      ss.getSheetByName(ABA.ABASTECIMENTOS).appendRow([agora, d.tecnico, d.placa, km, Number(d.valor) || '', litros, kmCoube, foto, fotoPainel]);
     } else {
       ss.getSheetByName(ABA.LEITURAS).appendRow([agora, d.tecnico, d.placa, km, d.periodo || '', foto, d.origem || 'Leitura automática']);
     }
@@ -74,7 +78,8 @@ function doPost(e) {
     if (status && status.situacao === 'Abastecer' && d.tipo !== 'abastecimento') {
       alertaEnviado = enviarAlerta_(status, d.tecnico, agora);
     }
-    return json_({ ok: true, situacao: status, alertaEnviado, kmDoDia: kmDoDia_(d.tecnico, d.placa, agora) });
+    const hoje = resumoDia_(d.tecnico, d.placa, agora);
+    return json_({ ok: true, situacao: status, alertaEnviado, kmDoDia: hoje.kmRodados, hoje });
   } catch (err) {
     return json_({ ok: false, erro: String(err) });
   } finally {
@@ -89,14 +94,34 @@ function situacaoVeiculo_(placa) {
            kmAtual: r[6], kmRodados: r[7], kmRestantes: r[8], litrosRestantes: r[9], situacao: r[10] };
 }
 
-/** Km rodados no dia pelo técnico naquele veículo (maior leitura menos a menor). */
-function kmDoDia_(tecnico, placa, agora) {
-  const dia = Utilities.formatDate(agora, 'America/Sao_Paulo', 'yyyy-MM-dd');
-  const kms = linhas_(SpreadsheetApp.getActive().getSheetByName(ABA.LEITURAS))
-    .filter(r => r[1] === tecnico && r[2] === placa &&
-                 Utilities.formatDate(new Date(r[0]), 'America/Sao_Paulo', 'yyyy-MM-dd') === dia)
-    .map(r => Number(r[3]));
-  return kms.length ? Math.max(...kms) - Math.min(...kms) : 0;
+/**
+ * Resumo do dia do técnico: km rodados (maior km do dia menos o menor, contando
+ * leituras e abastecimentos) e gasto estimado de combustível
+ * (km rodados / consumo x preço por litro do último abastecimento do veículo).
+ */
+function resumoDia_(tecnico, placa, agora) {
+  const ss = SpreadsheetApp.getActive();
+  const tz = 'America/Sao_Paulo';
+  const dia = Utilities.formatDate(agora, tz, 'yyyy-MM-dd');
+  const doDia = r => r[0] && Utilities.formatDate(new Date(r[0]), tz, 'yyyy-MM-dd') === dia;
+  const leituras = linhas_(ss.getSheetByName(ABA.LEITURAS)).filter(r => r[1] === tecnico && r[2] === placa && doDia(r));
+  const abastecimentos = linhas_(ss.getSheetByName(ABA.ABASTECIMENTOS)).filter(r => r[2] === placa);
+  const abastHoje = abastecimentos.filter(r => r[1] === tecnico && doDia(r));
+  const kms = leituras.map(r => Number(r[3])).concat(abastHoje.map(r => Number(r[3]))).filter(n => n > 0);
+  const kmRodados = kms.length ? Math.max(...kms) - Math.min(...kms) : 0;
+  const consumo = Number(config_().getRange('B2').getValue()) || 10;
+  const ultimo = abastecimentos.filter(r => Number(r[4]) > 0 && Number(r[5]) > 0).pop();
+  const precoLitro = ultimo ? Number(ultimo[4]) / Number(ultimo[5]) : 0;
+  const litros = kmRodados / consumo;
+  return {
+    kmRodados,
+    litros: Math.round(litros * 100) / 100,
+    precoLitro: Math.round(precoLitro * 100) / 100,
+    gasto: Math.round(litros * precoLitro * 100) / 100,
+    inicioFeito: leituras.some(r => r[4] === 'Início do dia'),
+    abastecimentoFeito: abastHoje.length > 0,
+    fimFeito: leituras.some(r => r[4] === 'Fim do dia'),
+  };
 }
 
 function config_() {
