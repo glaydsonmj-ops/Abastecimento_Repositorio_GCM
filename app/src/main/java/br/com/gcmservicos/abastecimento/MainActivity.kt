@@ -444,15 +444,31 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
     var erro by remember { mutableStateOf<String?>(null) }
     var atualizar by remember { mutableIntStateOf(0) }
 
+    var atualizando by remember { mutableStateOf(false) }
+
     LaunchedEffect(atualizar) {
         erro = null
+        fun aplicar(r: JSONObject) {
+            hoje = r.optJSONObject("hoje")
+            checklists = r.optJSONArray("checklists")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } } ?: emptyList()
+            val vs = r.optJSONArray("veiculos") ?: org.json.JSONArray()
+            veiculo = (0 until vs.length()).map { vs.getJSONObject(it) }.firstOrNull { it.optString("placa") == prefs.placa }
+        }
+        // Mostra na hora os últimos dados guardados no aparelho e atualiza em seguida.
+        val dia = SimpleDateFormat("yyyy-MM-dd", BR).format(Date())
+        val chaveCache = dia + "|" + prefs.tecnico + "|" + prefs.placa
+        if (hoje == null) {
+            try {
+                val g = JSONObject(prefs.ultimaConsulta)
+                if (g.optString("chave") == chaveCache) aplicar(g.getJSONObject("r"))
+            } catch (e: Exception) { /* sem dados guardados */ }
+        }
+        atualizando = true
         try {
             val url = prefs.url + "?tecnico=" + Uri.encode(prefs.tecnico) + "&placa=" + Uri.encode(prefs.placa)
             val r = Api.consultar(url, prefs.senha)
-            hoje = r.optJSONObject("hoje")
-            checklists = r.optJSONArray("checklists")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } } ?: emptyList()
-            val vs = r.getJSONArray("veiculos")
-            veiculo = (0 until vs.length()).map { vs.getJSONObject(it) }.firstOrNull { it.optString("placa") == prefs.placa }
+            aplicar(r)
+            prefs.ultimaConsulta = JSONObject().put("chave", chaveCache).put("r", r).toString()
             prefs.salvarOleo(veiculo?.optJSONObject("oleo"))
             r.optJSONObject("config")?.let { c ->
                 prefs.consumoKmL = c.optDouble("consumoKmL", prefs.consumoKmL)
@@ -461,11 +477,20 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
         } catch (e: Exception) {
             // Senha trocada ou apagada na planilha: volta para a tela de login.
             if (e.message?.startsWith("Entre novamente") == true) aoTrocar()
-            else erro = "Sem conexão com o sistema. Toque em Atualizar."
+            else erro = if (hoje != null) "Não foi possível atualizar agora. Mostrando os últimos dados." else "Sem conexão com o sistema. Toque em Atualizar."
+        } finally {
+            atualizando = false
         }
     }
 
     Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        if (atualizando && hoje != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                LinearProgressIndicator(Modifier.weight(1f).clip(CircleShape), color = Cores.MAGENTA)
+                Text("Atualizando...", color = Cores.SUAVE, fontSize = 13.sp)
+            }
+        }
+        if (erro != null && hoje != null) Aviso(erro!!, Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning)
         aviso?.let { Aviso(it, Cores.VERDE_CLARO, Cores.VERDE, Icons.Filled.CheckCircle) }
 
         CartaoAlertas()
