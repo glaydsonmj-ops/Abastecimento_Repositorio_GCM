@@ -54,18 +54,19 @@ function consultar_(p) {
   return comMemo_(() => consultarDados_(p));
 }
 function consultarDados_(p) {
-  if (p.acao === 'tecnicos') return listaTecnicos_();
-  if (!autorizado_(p)) return { ok: false, erro: ERRO_LOGIN };
+  // Os nomes dos técnicos não são mais divulgados (cada técnico só vê os próprios dados).
+  if (p.acao === 'tecnicos') return { ok: true, tecnicos: [] };
+  const t = autorizado_(p);
+  if (!t) return { ok: false, erro: ERRO_LOGIN };
   const ss = SpreadsheetApp.getActive();
   const cfg = parametros_();
-  const veiculos = linhas_(ss.getSheetByName(ABA.VEICULOS)).filter(r => r[V.PLACA]).map(r => veiculoJson_(r, cfg));
-  const tecnicos = linhas_(ss.getSheetByName(ABA.TECNICOS))
-    .filter(r => r[0] && String(r[3]).toLowerCase() !== 'não')
-    .map(r => ({ nome: r[0], email: r[1], placa: r[2] }));
+  // Somente o veículo e o cadastro do próprio técnico.
+  const veiculos = linhas_(ss.getSheetByName(ABA.VEICULOS)).filter(r => r[V.PLACA] && String(r[V.PLACA]) === t.placa).map(r => veiculoJson_(r, cfg));
+  const tecnicos = [{ nome: t.nome, email: t.email, placa: t.placa }];
   const config = { consumoKmL: cfg.consumo, antecedenciaKm: cfg.antecedencia, valorPadrao: cfg.valorPadrao,
                    lembreteInicio: cfg.lembreteInicio, lembreteFim: cfg.lembreteFim };
-  const tecnico = p.tecnico || '';
-  const placa = p.placa || '';
+  const tecnico = t.nome;
+  const placa = t.placa;
   const resposta = { ok: true, veiculos, tecnicos, config };
   if (tecnico && placa) {
     resposta.hoje = resumoDia_(tecnico, placa, new Date());
@@ -156,8 +157,12 @@ function registrar_(d) {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    if (!autorizado_(d)) return { ok: false, erro: ERRO_LOGIN };
-    if (!d.placa || !d.tecnico) return { ok: false, erro: 'Dados incompletos' };
+    const t = autorizado_(d);
+    if (!t) return { ok: false, erro: ERRO_LOGIN };
+    if (!t.placa) return { ok: false, erro: 'Seu cadastro está sem veículo. Fale com o responsável.' };
+    // O registro fica sempre no nome e no veículo do técnico que entrou com a senha.
+    d.tecnico = t.nome;
+    d.placa = t.placa;
     const ss = SpreadsheetApp.getActive();
     const agora = new Date();
     const cfg = parametros_();
@@ -418,37 +423,36 @@ function comMemo_(fn) {
 const ERRO_LOGIN = 'Entre novamente: nome ou senha incorretos.';
 
 /** Linha do técnico ativo na aba Técnicos (A nome, B e-mail, C placa, D ativo, E senha). */
+/** Nome comparável: sem acentos, sem diferença de maiúsculas e com espaços simples. */
+function normalizarNome_(x) {
+  return String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
 function tecnicoPorNome_(nome) {
-  const alvo = String(nome || '').trim().toLowerCase();
+  const alvo = normalizarNome_(nome);
   if (!alvo) return null;
   const aba = SpreadsheetApp.getActive().getSheetByName(ABA.TECNICOS);
   const linhas = linhas_(aba);
-  const i = linhas.findIndex(r => String(r[0]).trim().toLowerCase() === alvo && String(r[3]).toLowerCase() !== 'não');
+  const i = linhas.findIndex(r => normalizarNome_(r[0]) === alvo && String(r[3]).toLowerCase() !== 'não');
   if (i < 0) return null;
   const r = linhas[i];
   return { linha: i + 2, nome: String(r[0]).trim(), email: r[1], placa: String(r[2] || '').trim(), senha: String(r[4] == null ? '' : r[4]).trim(), aba };
 }
 
-/** Aceita a senha do técnico (novo login) ou a chave antiga (versões anteriores do app). */
+/**
+ * Confere o nome e a senha do técnico e devolve o cadastro dele (ou null).
+ * A chave antiga deixou de valer: cada técnico só acessa os próprios dados com a própria senha.
+ */
 function autorizado_(d) {
-  if (d.chave && chaveValida_(d.chave)) return true;
   const t = tecnicoPorNome_(d.tecnico);
-  if (!t || !t.senha || d.senha == null) return false;
+  if (!t || !t.senha || d.senha == null) return null;
   const cache = CacheService.getScriptCache();
   const chaveCache = 'falhas_' + t.nome.toLowerCase();
   const falhas = Number(cache.get(chaveCache)) || 0;
-  if (falhas >= 5) return false;
-  if (String(d.senha).trim() === t.senha) return true;
+  if (falhas >= 5) return null;
+  if (String(d.senha).trim() === t.senha) return t;
   cache.put(chaveCache, String(falhas + 1), 900);
-  return false;
-}
-
-/** Nomes dos técnicos ativos, para a tela de login. */
-function listaTecnicos_() {
-  const tecnicos = linhas_(SpreadsheetApp.getActive().getSheetByName(ABA.TECNICOS))
-    .filter(r => r[0] && String(r[3]).toLowerCase() !== 'não')
-    .map(r => ({ nome: String(r[0]).trim(), temSenha: String(r[4] == null ? '' : r[4]).trim() !== '' }));
-  return { ok: true, tecnicos };
+  return null;
 }
 
 /**
@@ -458,7 +462,7 @@ function listaTecnicos_() {
  */
 function login_(d) {
   const t = tecnicoPorNome_(d.tecnico);
-  if (!t) return { ok: false, erro: 'Técnico não encontrado. Peça ao responsável para cadastrar você.' };
+  if (!t) return { ok: false, erro: 'Nome não encontrado. Confira o nome digitado ou faça seu cadastro em "Primeiro acesso".' };
   const senha = String(d.senha == null ? '' : d.senha).trim();
   if (!/^\d{4}$/.test(senha)) return { ok: false, erro: 'A senha deve ter 4 números.' };
   const cache = CacheService.getScriptCache();
@@ -483,9 +487,11 @@ function login_(d) {
   cache.remove(chaveCache);
   const ss = SpreadsheetApp.getActive();
   const cfg = parametros_();
-  const placas = linhas_(ss.getSheetByName(ABA.VEICULOS)).filter(r => r[V.PLACA]).map(r => String(r[V.PLACA]));
+  // Só o veículo do próprio técnico.
+  const existe = !!t.placa && linhas_(ss.getSheetByName(ABA.VEICULOS)).some(r => String(r[V.PLACA]) === t.placa);
+  const placas = existe ? [t.placa] : [];
   return {
-    ok: true, primeiroAcesso, tecnico: t.nome, placa: placas.includes(t.placa) ? t.placa : '', placas,
+    ok: true, primeiroAcesso, tecnico: t.nome, placa: existe ? t.placa : '', placas,
     config: { consumoKmL: cfg.consumo, antecedenciaKm: cfg.antecedencia, valorPadrao: cfg.valorPadrao,
               lembreteInicio: cfg.lembreteInicio, lembreteFim: cfg.lembreteFim },
   };
@@ -510,7 +516,7 @@ function cadastro_(d) {
   try {
     const ss = SpreadsheetApp.getActive();
     const abaTec = ss.getSheetByName(ABA.TECNICOS);
-    const existentes = linhas_(abaTec).filter(r => String(r[0]).trim().toLowerCase() === nome.toLowerCase());
+    const existentes = linhas_(abaTec).filter(r => normalizarNome_(r[0]) === normalizarNome_(nome));
     if (existentes.length) return { ok: false, erro: 'Já existe um cadastro com este nome. Volte e entre com a sua senha.' };
 
     const abaV = ss.getSheetByName(ABA.VEICULOS);
@@ -544,9 +550,8 @@ function cadastro_(d) {
           `\nPara desativar, coloque "Não" na coluna "Ativo" da aba Técnicos.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
       } catch (err) { console.error(err); }
     }
-    const placasTodas = linhas_(abaV).filter(r => r[V.PLACA]).map(r => String(r[V.PLACA]));
     return {
-      ok: true, primeiroAcesso: true, tecnico: nome, placa: placaFinal, placas: placasTodas,
+      ok: true, primeiroAcesso: true, tecnico: nome, placa: placaFinal, placas: [placaFinal],
       config: { consumoKmL: cfg.consumo, antecedenciaKm: cfg.antecedencia, valorPadrao: cfg.valorPadrao,
                 lembreteInicio: cfg.lembreteInicio, lembreteFim: cfg.lembreteFim },
     };
@@ -563,12 +568,6 @@ function webRegistrar(d) {
   try { return JSON.stringify(registrar_(d || {})); } catch (err) { return JSON.stringify({ ok: false, erro: String(err) }); }
 }
 
-function chaveValida_(chave) {
-  const esperada = PropertiesService.getScriptProperties().getProperty('CHAVE_APP') ||
-    String(config_().getRange('B8').getValue()).trim();
-  return !!esperada && chave === esperada;
-}
-
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -581,8 +580,9 @@ function relatorio_(tecnico, placa, agora) {
   const cfg = parametros_();
   const dia = x => Utilities.formatDate(new Date(x), TZ, 'yyyy-MM-dd');
   const mes = Utilities.formatDate(agora, TZ, 'yyyy-MM');
-  const abast = linhas_(ss.getSheetByName(ABA.ABASTECIMENTOS)).filter(r => r[0] && r[2] === placa);
-  const leit = linhas_(ss.getSheetByName(ABA.LEITURAS)).filter(r => r[0] && r[2] === placa);
+  // Somente os registros do próprio técnico (outros técnicos do mesmo veículo não aparecem).
+  const abast = linhas_(ss.getSheetByName(ABA.ABASTECIMENTOS)).filter(r => r[0] && r[2] === placa && r[1] === tecnico);
+  const leit = linhas_(ss.getSheetByName(ABA.LEITURAS)).filter(r => r[0] && r[2] === placa && r[1] === tecnico);
   const ultimoComPreco = abast.filter(r => Number(r[4]) > 0 && Number(r[5]) > 0).pop();
   const precoLitro = ultimoComPreco ? Number(ultimoComPreco[4]) / Number(ultimoComPreco[5]) : 0;
 
@@ -997,47 +997,45 @@ function appTecnico_() {
   });
 
   // ---------------------------------------------------------------- Login
+  // O celular lembra o nome do dono. Sem dono, abre direto o cadastro.
+  function dono() { try { return localStorage.getItem('gcm_dono') || ''; } catch (e) { return ''; } }
+  function gravarDono(n) { try { localStorage.setItem('gcm_dono', n); } catch (e) { /* sem armazenamento */ } }
   function sair(msg) { gravar(null); sessao = null; telaLogin(msg); }
 
   function telaLogin(msg) {
-    estado = { login: { tecnicos: null, escolhido: null } };
-    tela('Combustível GCM', 'Entrar', '<img class="logo" src="' + E(CFG.logo) + '" alt="GCM Serviços" onerror="this.remove()">' +
-      '<div class="cartao" id="login"><h2>Quem é você?</h2><div class="carregando"></div></div>' + (msg ? '<div class="aviso atencao">' + E(msg) + '</div>' : ''), false);
-    chamar('webConsultar', { acao: 'tecnicos' }).then(r => { estado.login.tecnicos = r.tecnicos; desenharLogin(); })
-      .catch(e => { document.getElementById('login').innerHTML = '<h2>Quem é você?</h2><div class="aviso erro">' + E(e.message) + '</div><button class="btn contorno" data-acao="recarregarLogin">Tentar de novo</button>'; });
+    estado = { login: { outro: !dono(), msg: msg || '' } };
+    if (!dono() && !msg) { ac.cadastro(); return; }
+    desenharLogin();
   }
-  ac.recarregarLogin = () => telaLogin();
 
   function desenharLogin(erro) {
     const L = estado.login;
-    const t = L.escolhido;
-    let h = '<h2>Quem é você?</h2>';
-    if (!L.tecnicos.length) h += '<div class="aviso erro">Ainda não há técnicos cadastrados. Toque em Primeiro acesso abaixo.</div>';
-    L.tecnicos.forEach((x, i) => { h += '<button class="opcao' + (t === x ? ' sel' : '') + '" data-acao="escolher" data-i="' + i + '">👤 ' + E(x.nome) + '</button>'; });
-    if (t) {
-      if (t.temSenha) {
-        h += '<label for="senha">Sua senha (4 números)</label><input id="senha" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="current-password">';
-      } else {
-        h += '<div class="aviso atencao">Primeiro acesso: crie uma senha de 4 números. Ela será pedida só ao entrar.</div>' +
-          '<label for="senha">Nova senha (4 números)</label><input id="senha" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password">' +
-          '<label for="senha2">Repita a senha</label><input id="senha2" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password">';
-      }
-      if (erro) h += '<div class="aviso erro">' + E(erro) + '</div>';
-      h += '<button class="btn" data-acao="entrar">Entrar</button>';
-    }
-    h += '<button class="btn contorno" data-acao="cadastro">✍️ Primeiro acesso? Fazer meu cadastro</button>';
-    document.getElementById('login').innerHTML = h;
-    const s = document.getElementById('senha'); if (s) s.focus();
+    const nome = dono();
+    let h = '<img class="logo" src="' + E(CFG.logo) + '" alt="GCM Serviços" onerror="this.remove()">';
+    if (L.msg) h += '<div class="aviso atencao">' + E(L.msg) + '</div>';
+    h += '<div class="cartao"><h2>🔒 ' + (L.outro ? 'Entrar' : 'Olá, ' + E(nome.split(' ')[0]) + '!') + '</h2>';
+    if (L.outro) h += '<label for="nome">Seu nome e sobrenome</label><input id="nome" autocapitalize="words" value="' + E(L.nome || '') + '">';
+    else h += '<p class="sub">Digite sua senha para entrar.</p>';
+    h += '<label for="senha">Senha (4 números)</label><input id="senha" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="current-password">';
+    if (erro) h += '<div class="aviso erro">' + E(erro) + '</div>';
+    h += '<button class="btn" data-acao="entrar">Entrar</button></div>';
+    if (!L.outro) h += '<button class="link" data-acao="outroNome" style="width:100%">Não é você? Entrar com outro nome</button>';
+    h += '<button class="link" data-acao="cadastro" style="width:100%;color:var(--azul);font-weight:700">Primeiro acesso? Fazer meu cadastro</button>';
+    tela('Combustível GCM', 'Entrar', h, false);
+    const s = document.getElementById(L.outro && !L.nome ? 'nome' : 'senha'); if (s) s.focus();
   }
-  ac.escolher = b => { estado.login.escolhido = estado.login.tecnicos[Number(b.dataset.i)]; desenharLogin(); };
+  ac.outroNome = () => { estado.login.outro = true; estado.login.nome = ''; desenharLogin(); };
   ac.entrar = b => {
-    const t = estado.login.escolhido;
+    const L = estado.login;
+    const nomeEl = document.getElementById('nome');
+    const nome = nomeEl ? nomeEl.value.trim() : dono();
+    if (nomeEl) L.nome = nome;
     const senha = (document.getElementById('senha').value || '').trim();
-    const s2 = document.getElementById('senha2');
+    if (nome.split(/ +/).length < 2) { desenharLogin('Digite seu nome e sobrenome.'); return; }
     if (!/^[0-9]{4}$/.test(senha)) { desenharLogin('A senha deve ter 4 números.'); return; }
-    if (s2 && s2.value.trim() !== senha) { desenharLogin('As senhas não são iguais.'); return; }
     b.disabled = true; b.textContent = 'Entrando...';
-    chamar('webRegistrar', { tipo: 'login', tecnico: t.nome, senha }).then(r => {
+    chamar('webRegistrar', { tipo: 'login', tecnico: nome, senha }).then(r => {
+      gravarDono(r.tecnico);
       sessao = { tecnico: r.tecnico, senha, placa: r.placa || (r.placas.length === 1 ? r.placas[0] : '') };
       if (sessao.placa) { gravar(sessao); telaInicio(r.primeiroAcesso ? 'Senha criada. Bem-vindo!' : ''); }
       else telaVeiculo(r.placas);
@@ -1049,9 +1047,10 @@ function appTecnico_() {
     ['placa', 'Placa do veículo', 'text', 'characters'], ['modelo', 'Modelo do veículo', 'text', 'words'],
     ['ano', 'Ano do veículo', 'number', 'none'], ['cor', 'Cor do veículo', 'text', 'words']];
   ac.cadastro = () => { estado = { cad: {} }; desenharCadastro(); };
+  ac.jaTenho = () => { estado = { login: { outro: !dono(), msg: '' } }; desenharLogin(); };
   function desenharCadastro(erro) {
     const c = estado.cad;
-    let x = '<div class="cartao"><h2>Seus dados</h2><p class="sub">Preencha uma única vez. Depois, é só entrar com o nome e a senha.</p>';
+    let x = '<img class="logo" src="' + E(CFG.logo) + '" alt="GCM Serviços" onerror="this.remove()"><div class="cartao"><h2>Seus dados</h2><p class="sub">Preencha uma única vez. Depois, o aplicativo só pede a sua senha.</p>';
     CAMPOS_CAD.forEach(f => {
       x += '<label for="cad_' + f[0] + '">' + f[1] + '</label><input id="cad_' + f[0] + '" type="' + (f[2] === 'number' ? 'text' : f[2]) + '"' +
         (f[2] === 'number' ? ' inputmode="numeric" maxlength="4"' : '') + ' autocapitalize="' + f[3] + '" value="' + E(c[f[0]] || '') + '">';
@@ -1059,8 +1058,8 @@ function appTecnico_() {
     x += '</div><div class="cartao"><h2>Crie sua senha</h2><label for="cad_senha">Senha (4 números)</label><input id="cad_senha" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password">' +
       '<label for="cad_senha2">Repita a senha</label><input id="cad_senha2" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password"></div>' +
       (erro ? '<div class="aviso erro">' + E(erro) + '</div>' : '') + '<button class="btn" data-acao="salvarCadastro">Cadastrar e entrar</button>';
-    tela('Primeiro acesso', 'Cadastro do técnico', x, true);
-    ac.voltar = () => { ac.voltar = () => telaInicio(); telaLogin(); };
+    x += '<button class="link" data-acao="jaTenho" style="width:100%;color:var(--azul);font-weight:700">Já tenho cadastro? Entrar</button>';
+    tela('Bem-vindo!', 'Faça seu cadastro', x, false);
   }
   ac.salvarCadastro = b => {
     const c = estado.cad;
@@ -1074,7 +1073,7 @@ function appTecnico_() {
     chamar('webRegistrar', Object.assign({ tipo: 'cadastro', senha }, c)).then(r => {
       sessao = { tecnico: r.tecnico, senha, placa: r.placa };
       gravar(sessao);
-      ac.voltar = () => telaInicio();
+      gravarDono(r.tecnico);
       telaInicio('Cadastro feito. Bem-vindo, ' + r.tecnico.split(' ')[0] + '!');
     }).catch(e => desenharCadastro(e.message));
   };
@@ -1312,5 +1311,6 @@ function appTecnico_() {
 
   // ---------------------------------------------------------------- Começo
   sessao = ler();
+  if (sessao && sessao.tecnico && !dono()) gravarDono(sessao.tecnico);
   if (sessao && sessao.tecnico && sessao.senha && sessao.placa) telaInicio(); else telaLogin();
 }
