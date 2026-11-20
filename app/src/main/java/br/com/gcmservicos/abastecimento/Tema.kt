@@ -69,10 +69,10 @@ fun SimboloGcm(tamanho: Dp = 44.dp) {
     Image(painterResource(R.drawable.logo_g), contentDescription = "GCM", modifier = Modifier.size(tamanho))
 }
 
-/** Logo completa da GCM Serviços Telecomunicações. */
+/** Logo completa: GCM Serviços, App de Combustível. */
 @Composable
 fun LogoGcm(modifier: Modifier = Modifier) {
-    Image(painterResource(R.drawable.logo_gcm), contentDescription = "GCM Serviços Telecomunicações", modifier = modifier)
+    Image(painterResource(R.drawable.logo_gcm), contentDescription = "GCM Serviços - App de Combustível", modifier = modifier)
 }
 
 /** Botão principal com o degradê da marca (magenta para laranja). */
