@@ -57,7 +57,7 @@ function consultarDados_(p) {
   // Os nomes dos técnicos não são mais divulgados (cada técnico só vê os próprios dados).
   if (p.acao === 'tecnicos') return { ok: true, tecnicos: [] };
   const t = autorizado_(p);
-  if (!t) return { ok: false, erro: ERRO_LOGIN };
+  if (!t) return { ok: false, erro: p.tecnico && !tecnicoPorNome_(p.tecnico) ? ERRO_EXCLUIDO : ERRO_LOGIN };
   const ss = SpreadsheetApp.getActive();
   const cfg = parametros_();
   // Somente o veículo e o cadastro do próprio técnico.
@@ -158,7 +158,7 @@ function registrar_(d) {
   lock.waitLock(30000);
   try {
     const t = autorizado_(d);
-    if (!t) return { ok: false, erro: ERRO_LOGIN };
+    if (!t) return { ok: false, erro: d.tecnico && !tecnicoPorNome_(d.tecnico) ? ERRO_EXCLUIDO : ERRO_LOGIN };
     if (!t.placa) return { ok: false, erro: 'Seu cadastro está sem veículo. Fale com o responsável.' };
     // O registro fica sempre no nome e no veículo do técnico que entrou com a senha.
     d.tecnico = t.nome;
@@ -421,6 +421,7 @@ function comMemo_(fn) {
 
 /** A chave fica na aba Configurações (B8) ou na propriedade do script CHAVE_APP. */
 const ERRO_LOGIN = 'Entre novamente: nome ou senha incorretos.';
+const ERRO_EXCLUIDO = 'Seu cadastro foi excluído pelo responsável. Faça um novo cadastro.';
 
 /** Linha do técnico ativo na aba Técnicos (A nome, B e-mail, C placa, D ativo, E senha). */
 /** Nome comparável: sem acentos, sem diferença de maiúsculas e com espaços simples. */
@@ -704,6 +705,37 @@ function excluirVeiculo(chave, placa) {
   }
 }
 
+/**
+ * Exclui o cadastro (login) de um técnico (botão "Excluir" da gestão de frota).
+ * A linha sai da aba Técnicos; o histórico em todas as outras abas é mantido.
+ * O celular do técnico volta para a tela de cadastro na próxima vez que abrir o aplicativo.
+ */
+function excluirTecnico(chave, nome) {
+  const cfg = parametros_();
+  if (!cfg.chaveFrota || chave !== cfg.chaveFrota) throw new Error('Chave da gestão de frota inválida.');
+  nome = String(nome || '').trim();
+  if (!nome) throw new Error('Informe o técnico.');
+  const trava = LockService.getScriptLock();
+  trava.waitLock(20000);
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const aba = ss.getSheetByName(ABA.TECNICOS);
+    const n = aba.getLastRow() - 1;
+    if (n < 1) throw new Error('Técnico não encontrado.');
+    const nomes = aba.getRange(2, 1, n, 3).getValues();
+    const i = nomes.findIndex(r => String(r[0]).trim() === nome);
+    if (i < 0) throw new Error('Técnico não encontrado.');
+    const placa = String(nomes[i][2] || '');
+    aba.deleteRow(i + 2);
+    ss.getSheetByName(ABA.ALERTAS).appendRow([new Date(), placa, nome, '', '', 'Técnico excluído']);
+    CacheService.getScriptCache().remove('falhas_' + nome.toLowerCase());
+    SpreadsheetApp.flush();
+    return { ok: true, nome };
+  } finally {
+    trava.releaseLock();
+  }
+}
+
 function dadosFrota_(cfg) {
   const ss = SpreadsheetApp.getActive();
   const agora = new Date();
@@ -819,6 +851,8 @@ td{padding:10px 8px;border-bottom:1px solid var(--linha);vertical-align:top}tr:l
 .login img{width:180px}.login input{width:100%;padding:12px;border:2px solid var(--linha);border-radius:12px;font-size:16px;margin:8px 0}
 button.excluir{background:#fff;color:var(--vermelho);border:1.5px solid var(--vermelho);padding:6px 12px;font-size:13px;border-radius:10px}
 button.excluir:hover{background:var(--vermelho-c)}button.excluir:disabled{opacity:.6;cursor:wait}
+button.excluir-tec{margin-top:6px;background:#fff;color:var(--vermelho);border:1.5px solid var(--vermelho);padding:4px 10px;font-size:12px;border-radius:10px}
+button.excluir-tec:hover{background:var(--vermelho-c)}button.excluir-tec:disabled{opacity:.6;cursor:wait}
 .login button{width:100%;background:linear-gradient(90deg,var(--magenta),var(--laranja));color:#fff;padding:14px}.erro{color:var(--vermelho)}
 `;
 
@@ -858,7 +892,7 @@ h+='</table></div></section>';
 const mx=Math.max(1,...D.dias.map(d=>d.gasto));
 h+='<div class="duas"><section class="cartao"><h2>Gasto com combustível nos últimos 30 dias</h2><div class="barras">'+
  D.dias.map((d,i)=>'<div class="barra" title="'+E(d.dia)+': '+R(d.gasto)+'"><i style="height:'+(d.gasto/mx*100)+'%"></i><span>'+(i%5===4?E(d.dia):'&nbsp;')+'</span></div>').join('')+'</div></section>';
-h+='<section class="cartao"><h2>Por técnico no mês</h2><div class="lista">'+(D.porTecnico.length?D.porTecnico.map(t=>'<div class="item"><div><b>'+E(t.nome)+'</b><div class="sub">'+E(t.placa)+' · '+t.abastecimentos+' abastecimento(s)</div></div><div style="text-align:right"><b>'+R(t.gastoMes)+'</b><div class="sub">'+N(t.kmMes)+' km</div></div></div>').join(''):'<p class="vazio">Nenhum técnico.</p>')+'</div></section></div>';
+h+='<section class="cartao"><h2>Por técnico no mês</h2><div class="lista">'+(D.porTecnico.length?D.porTecnico.map(t=>'<div class="item"><div><b>'+E(t.nome)+'</b><div class="sub">'+E(t.placa)+' · '+t.abastecimentos+' abastecimento(s)</div></div><div style="text-align:right"><b>'+R(t.gastoMes)+'</b><div class="sub">'+N(t.kmMes)+' km</div><button class="excluir-tec" data-nome="'+E(t.nome)+'">Excluir login</button></div></div>').join(''):'<p class="vazio">Nenhum técnico.</p>')+'</div></section></div>';
 h+='<div class="duas"><section class="cartao"><h2>Últimos abastecimentos</h2><div class="tabela"><table><tr><th>Data</th><th>Técnico</th><th>Placa</th><th>Valor</th><th>Litros</th><th>Km</th><th>Nota</th></tr>'+
  (D.abastecimentos.length?D.abastecimentos.map(a=>'<tr><td>'+E(a.data)+'</td><td>'+E(a.tecnico)+'</td><td>'+E(a.placa)+'</td><td>'+R(a.valor)+'</td><td>'+N(a.litros)+'</td><td>'+N(a.km)+'</td><td>'+(a.nota?'<a href="'+E(a.nota)+'" target="_blank">Ver</a>':'')+'</td></tr>').join(''):'<tr><td colspan="7" class="vazio">Nenhum abastecimento registrado.</td></tr>')+'</table></div></section>';
 h+='<section class="cartao"><h2>Ocorrências e alertas</h2><div class="lista">'+
@@ -880,6 +914,14 @@ document.querySelectorAll('button.excluir').forEach(b=>b.addEventListener('click
  google.script.run.withSuccessHandler(()=>{window.top.location.href=URL_FROTA;})
   .withFailureHandler(e=>{b.disabled=false;b.textContent='Excluir';alert('Não foi possível excluir: '+(e&&e.message||e));})
   .excluirVeiculo(CHAVE,placa);
+}));
+document.querySelectorAll('button.excluir-tec').forEach(b=>b.addEventListener('click',()=>{
+ const nome=b.dataset.nome;
+ if(!confirm('Deseja realmente excluir o login de '+nome+'? Ele não conseguirá mais entrar no aplicativo e o celular dele voltará para a tela de cadastro. O histórico será mantido na planilha.'))return;
+ b.disabled=true;b.textContent='Excluindo…';
+ google.script.run.withSuccessHandler(()=>{window.top.location.href=URL_FROTA;})
+  .withFailureHandler(e=>{b.disabled=false;b.textContent='Excluir login';alert('Não foi possível excluir: '+(e&&e.message||e));})
+  .excluirTecnico(CHAVE,nome);
 }));
 `;
 
@@ -973,6 +1015,10 @@ function appTecnico_() {
       google.script.run.withSuccessHandler(t => {
         let r; try { r = JSON.parse(t); } catch (e) { falha(new Error('Resposta inválida do sistema.')); return; }
         if (!r.ok) {
+          if (String(r.erro || '').indexOf('Seu cadastro foi excluído') === 0 && sessao) {
+            try { localStorage.removeItem('gcm_dono'); } catch (e) { /* sem armazenamento */ }
+            gravar(null); sessao = null; telaLogin(); return;
+          }
           if (String(r.erro || '').indexOf('Entre novamente') === 0 && sessao) { sair('Sua senha mudou. Entre novamente.'); }
           falha(new Error(r.erro || 'Erro no sistema.')); return;
         }

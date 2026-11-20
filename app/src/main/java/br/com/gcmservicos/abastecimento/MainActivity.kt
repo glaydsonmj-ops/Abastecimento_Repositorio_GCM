@@ -508,7 +508,11 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
             }
         } catch (e: Exception) {
             // Senha trocada ou apagada na planilha: volta para a tela de login.
-            if (e.message?.startsWith("Entre novamente") == true) aoTrocar()
+            if (e.message?.startsWith("Seu cadastro foi excluído") == true) {
+                // Login excluído pelo responsável: o celular esquece o técnico e abre o cadastro.
+                prefs.tecnico = ""; prefs.placa = ""; prefs.ultimaConsulta = ""
+                aoTrocar()
+            } else if (e.message?.startsWith("Entre novamente") == true) aoTrocar()
             else erro = if (hoje != null) "Não foi possível atualizar agora. Mostrando os últimos dados." else "Sem conexão com o sistema. Toque em Atualizar."
         } finally {
             atualizando = false
