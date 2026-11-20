@@ -87,7 +87,7 @@ internal fun CartaoChecagem(prefs: Prefs, hoje: JSONObject, aoEnviar: () -> Unit
         escopo.launch {
             try {
                 Api.enviar(
-                    prefs.url, JSONObject().put("chave", prefs.chave).put("tipo", "checagem")
+                    prefs.url, JSONObject().put("senha", prefs.senha).put("tipo", "checagem")
                         .put("tecnico", prefs.tecnico).put("placa", prefs.placa)
                         .put("funcionando", funcionando).put("descricao", descricao.trim())
                 )
@@ -243,7 +243,7 @@ internal fun CartaoOleo(prefs: Prefs, oleo: JSONObject, aoAtualizar: (JSONObject
                     escopo.launch {
                         try {
                             val r = Api.enviar(
-                                prefs.url, JSONObject().put("chave", prefs.chave).put("tipo", "agendar_oleo")
+                                prefs.url, JSONObject().put("senha", prefs.senha).put("tipo", "agendar_oleo")
                                     .put("tecnico", prefs.tecnico).put("placa", prefs.placa).put("data", iso)
                             )
                             r.optJSONObject("veiculo")?.let { v ->
@@ -314,7 +314,7 @@ internal fun TelaChecklists(prefs: Prefs, aviso: String?, aoAbrir: (String, List
     LaunchedEffect(atualizar) {
         erro = null
         try {
-            lista = Api.consultar(urlTecnico(prefs), prefs.chave).optJSONArray("checklists").objetos()
+            lista = Api.consultar(urlTecnico(prefs), prefs.senha).optJSONArray("checklists").objetos()
         } catch (e: Exception) {
             erro = "Sem conexão com o sistema. Toque em Atualizar."
         }
@@ -437,7 +437,7 @@ internal fun TelaChecklist(prefs: Prefs, nome: String, itens: List<String>, aoCo
                             lista.put(JSONObject().put("item", i).put("condicao", condicao[i]).put("observacao", observacao[i]?.trim() ?: ""))
                         }
                         val r = Api.enviar(
-                            prefs.url, JSONObject().put("chave", prefs.chave).put("tipo", "checklist")
+                            prefs.url, JSONObject().put("senha", prefs.senha).put("tipo", "checklist")
                                 .put("tecnico", prefs.tecnico).put("placa", prefs.placa)
                                 .put("checklist", nome).put("itens", lista)
                         )
@@ -474,7 +474,7 @@ internal fun TelaRelatorio(prefs: Prefs) {
     LaunchedEffect(atualizar) {
         erro = null
         try {
-            rel = Api.consultar(urlTecnico(prefs, "&relatorio=1"), prefs.chave).optJSONObject("relatorio")
+            rel = Api.consultar(urlTecnico(prefs, "&relatorio=1"), prefs.senha).optJSONObject("relatorio")
         } catch (e: Exception) {
             erro = "Sem conexão com o sistema. Toque em Atualizar."
         }
@@ -567,7 +567,7 @@ internal fun TelaRelatorio(prefs: Prefs) {
                         escopo.launch {
                             try {
                                 val resp = Api.enviar(
-                                    prefs.url, JSONObject().put("chave", prefs.chave).put("tipo", "troca_oleo")
+                                    prefs.url, JSONObject().put("senha", prefs.senha).put("tipo", "troca_oleo")
                                         .put("tecnico", prefs.tecnico).put("placa", prefs.placa).put("km", kmOleo.toLong())
                                 )
                                 resp.optJSONObject("relatorio")?.let { rel = it; prefs.salvarOleo(it.optJSONObject("oleo")) }

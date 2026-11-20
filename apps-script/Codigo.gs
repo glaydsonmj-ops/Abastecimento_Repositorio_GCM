@@ -4,11 +4,14 @@
  * Instalação (uma única vez):
  * 1. Abra a planilha "Controle de Abastecimento GCM Serviços".
  * 2. Menu Extensões > Apps Script. Apague o conteúdo e cole este arquivo.
- * 3. Defina a chave de acesso do app na aba Configurações (célula B8)
- *    ou, se preferir, na propriedade do script CHAVE_APP.
- * 4. Implantar > Nova implantação > Tipo "App da Web".
+ * 3. Implantar > Nova implantação > Tipo "App da Web".
  *    Executar como: Eu. Quem pode acessar: Qualquer pessoa.
- * 5. Copie a URL gerada; ela será configurada no aplicativo.
+ * 4. A URL gerada fica embutida no aplicativo Android.
+ *
+ * Acesso dos técnicos: nome + senha de 4 números (aba Técnicos, coluna E).
+ * No primeiro acesso, o próprio técnico cria a senha; para trocá-la, apague a célula.
+ * Versão para iPhone (navegador): <URL do app>?pagina=tecnico
+ * A chave antiga (Configurações!B8) continua aceita só para versões anteriores do app.
  */
 
 const ABA = {
@@ -38,7 +41,18 @@ const PASTA_FOTOS = 'Fotos Abastecimento GCM';
 function doGet(e) {
   const p = e.parameter || {};
   if (p.pagina === 'frota') return paginaFrota_(p.chave);
-  if (!chaveValida_(p.chave)) return json_({ ok: false, erro: 'Chave inválida' });
+  if (p.pagina === 'tecnico' || p.pagina === 'app') return paginaTecnico_();
+  try {
+    return json_(consultar_(p));
+  } catch (err) {
+    return json_({ ok: false, erro: String(err) });
+  }
+}
+
+/** Consulta usada pelo app Android (GET) e pela versão web (iPhone). */
+function consultar_(p) {
+  if (p.acao === 'tecnicos') return listaTecnicos_();
+  if (!autorizado_(p)) return { ok: false, erro: ERRO_LOGIN };
   const ss = SpreadsheetApp.getActive();
   const cfg = parametros_();
   const veiculos = linhas_(ss.getSheetByName(ABA.VEICULOS)).filter(r => r[V.PLACA]).map(r => veiculoJson_(r, cfg));
@@ -55,7 +69,7 @@ function doGet(e) {
     resposta.checklists = situacaoChecklists_(tecnico, new Date());
   }
   if (tecnico && placa && p.relatorio === '1') resposta.relatorio = relatorio_(tecnico, placa, new Date());
-  return json_(resposta);
+  return resposta;
 }
 
 /** Parâmetros da aba Configurações. */
@@ -117,12 +131,23 @@ function dataBr_(x) {
  *   troca_oleo:    km, observacao
  */
 function doPost(e) {
+  let d;
+  try {
+    d = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return json_({ ok: false, erro: 'Dados inválidos' });
+  }
+  return json_(registrar_(d));
+}
+
+/** Registro usado pelo app Android (POST) e pela versão web (iPhone). */
+function registrar_(d) {
+  if (d.tipo === 'login') return login_(d);
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    const d = JSON.parse(e.postData.contents);
-    if (!chaveValida_(d.chave)) return json_({ ok: false, erro: 'Chave inválida' });
-    if (!d.placa || !d.tecnico) return json_({ ok: false, erro: 'Dados incompletos' });
+    if (!autorizado_(d)) return { ok: false, erro: ERRO_LOGIN };
+    if (!d.placa || !d.tecnico) return { ok: false, erro: 'Dados incompletos' };
     const ss = SpreadsheetApp.getActive();
     const agora = new Date();
     const cfg = parametros_();
@@ -133,13 +158,13 @@ function doPost(e) {
       marcarManutencao_(d.placa, !funcionando);
       if (!funcionando) avisarManutencao_(d.placa, d.tecnico, d.descricao || '', agora, cfg);
       SpreadsheetApp.flush();
-      return json_({ ok: true, hoje: resumoDia_(d.tecnico, d.placa, agora) });
+      return { ok: true, hoje: resumoDia_(d.tecnico, d.placa, agora) };
     }
 
     if (d.tipo === 'checklist') {
       const nome = String(d.checklist || '');
       const itens = Array.isArray(d.itens) ? d.itens : [];
-      if (!CHECKLISTS.includes(nome) || !itens.length) return json_({ ok: false, erro: 'Check-list incompleto' });
+      if (!CHECKLISTS.includes(nome) || !itens.length) return { ok: false, erro: 'Check-list incompleto' };
       const linhas = itens.map(i => [agora, d.tecnico, d.placa, nome, String(i.item || ''), String(i.condicao || ''), String(i.observacao || '')]);
       const aba = ss.getSheetByName(ABA.CHECKLISTS);
       aba.getRange(aba.getLastRow() + 1, 1, linhas.length, 7).setValues(linhas);
@@ -152,15 +177,15 @@ function doPost(e) {
         ss.getSheetByName(ABA.ALERTAS).appendRow([agora, d.placa, d.tecnico, nome, cfg.email, 'Check-list']);
       }
       SpreadsheetApp.flush();
-      return json_({ ok: true, problemas: problemas.length, checklists: situacaoChecklists_(d.tecnico, agora) });
+      return { ok: true, problemas: problemas.length, checklists: situacaoChecklists_(d.tecnico, agora) };
     }
 
     if (d.tipo === 'agendar_oleo') {
       const m = String(d.data || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
-      if (!m) return json_({ ok: false, erro: 'Data inválida' });
+      if (!m) return { ok: false, erro: 'Data inválida' };
       const data = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
       const linha = linhaVeiculo_(d.placa);
-      if (!linha) return json_({ ok: false, erro: 'Veículo não encontrado' });
+      if (!linha) return { ok: false, erro: 'Veículo não encontrado' };
       ss.getSheetByName(ABA.VEICULOS).getRange(linha, V.OLEO_AGENDADA + 1).setValue(data);
       SpreadsheetApp.flush();
       if (cfg.email) {
@@ -169,11 +194,11 @@ function doPost(e) {
           `Atenciosamente,\nControle de Abastecimento GCM Serviços`);
       }
       const r = linhas_(ss.getSheetByName(ABA.VEICULOS)).find(l => l[V.PLACA] === d.placa);
-      return json_({ ok: true, veiculo: veiculoJson_(r, cfg) });
+      return { ok: true, veiculo: veiculoJson_(r, cfg) };
     }
 
     const km = Number(d.km);
-    if (!(km > 0)) return json_({ ok: false, erro: 'Informe o km' });
+    if (!(km > 0)) return { ok: false, erro: 'Informe o km' };
 
     if (d.tipo === 'troca_oleo') {
       ss.getSheetByName(ABA.OLEO).appendRow([agora, d.tecnico, d.placa, km, d.observacao || '']);
@@ -185,14 +210,14 @@ function doPost(e) {
         aba.getRange(linha, V.OLEO_AGENDADA + 1).setValue('');
       }
       SpreadsheetApp.flush();
-      return json_({ ok: true, relatorio: relatorio_(d.tecnico, d.placa, agora) });
+      return { ok: true, relatorio: relatorio_(d.tecnico, d.placa, agora) };
     }
 
     const foto = d.fotoBase64 ? salvarFoto_(d.fotoBase64, d.placa, agora) : '';
     if (d.tipo === 'abastecimento') {
       const litros = Number(d.litros) || '';
       const kmCoube = Number(d.kmCoube) || (litros ? Math.round(litros * cfg.consumo) : '');
-      if (!kmCoube) return json_({ ok: false, erro: 'Informe os km que couberam no tanque ou os litros' });
+      if (!kmCoube) return { ok: false, erro: 'Informe os km que couberam no tanque ou os litros' };
       const fotoPainel = d.fotoPainelBase64 ? salvarFoto_(d.fotoPainelBase64, d.placa + '_painel', agora) : '';
       ss.getSheetByName(ABA.ABASTECIMENTOS).appendRow([agora, d.tecnico, d.placa, km, Number(d.valor) || '', litros, kmCoube, foto, fotoPainel]);
     } else {
@@ -207,9 +232,9 @@ function doPost(e) {
     }
     try { avisosPrevistos_(d.placa, d.tecnico, agora, cfg); } catch (err) { console.error(err); }
     const hoje = resumoDia_(d.tecnico, d.placa, agora);
-    return json_({ ok: true, situacao: status, alertaEnviado, kmDoDia: hoje.kmRodados, hoje });
+    return { ok: true, situacao: status, alertaEnviado, kmDoDia: hoje.kmRodados, hoje };
   } catch (err) {
-    return json_({ ok: false, erro: String(err) });
+    return { ok: false, erro: String(err) };
   } finally {
     lock.releaseLock();
   }
@@ -361,6 +386,90 @@ function linhas_(aba) {
 }
 
 /** A chave fica na aba Configurações (B8) ou na propriedade do script CHAVE_APP. */
+const ERRO_LOGIN = 'Entre novamente: nome ou senha incorretos.';
+
+/** Linha do técnico ativo na aba Técnicos (A nome, B e-mail, C placa, D ativo, E senha). */
+function tecnicoPorNome_(nome) {
+  const alvo = String(nome || '').trim().toLowerCase();
+  if (!alvo) return null;
+  const aba = SpreadsheetApp.getActive().getSheetByName(ABA.TECNICOS);
+  const linhas = linhas_(aba);
+  const i = linhas.findIndex(r => String(r[0]).trim().toLowerCase() === alvo && String(r[3]).toLowerCase() !== 'não');
+  if (i < 0) return null;
+  const r = linhas[i];
+  return { linha: i + 2, nome: String(r[0]).trim(), email: r[1], placa: String(r[2] || '').trim(), senha: String(r[4] == null ? '' : r[4]).trim(), aba };
+}
+
+/** Aceita a senha do técnico (novo login) ou a chave antiga (versões anteriores do app). */
+function autorizado_(d) {
+  if (d.chave && chaveValida_(d.chave)) return true;
+  const t = tecnicoPorNome_(d.tecnico);
+  if (!t || !t.senha || d.senha == null) return false;
+  const cache = CacheService.getScriptCache();
+  const chaveCache = 'falhas_' + t.nome.toLowerCase();
+  const falhas = Number(cache.get(chaveCache)) || 0;
+  if (falhas >= 5) return false;
+  if (String(d.senha).trim() === t.senha) return true;
+  cache.put(chaveCache, String(falhas + 1), 900);
+  return false;
+}
+
+/** Nomes dos técnicos ativos, para a tela de login. */
+function listaTecnicos_() {
+  const tecnicos = linhas_(SpreadsheetApp.getActive().getSheetByName(ABA.TECNICOS))
+    .filter(r => r[0] && String(r[3]).toLowerCase() !== 'não')
+    .map(r => ({ nome: String(r[0]).trim(), temSenha: String(r[4] == null ? '' : r[4]).trim() !== '' }));
+  return { ok: true, tecnicos };
+}
+
+/**
+ * Login do técnico: { tecnico, senha }. No primeiro acesso (senha em branco na aba Técnicos),
+ * a senha digitada passa a ser a senha do técnico. Para trocar a senha, apague a célula na coluna E.
+ * Após 5 tentativas erradas, o técnico fica bloqueado por 15 minutos.
+ */
+function login_(d) {
+  const t = tecnicoPorNome_(d.tecnico);
+  if (!t) return { ok: false, erro: 'Técnico não encontrado. Peça ao responsável para cadastrar você.' };
+  const senha = String(d.senha == null ? '' : d.senha).trim();
+  if (!/^\d{4}$/.test(senha)) return { ok: false, erro: 'A senha deve ter 4 números.' };
+  const cache = CacheService.getScriptCache();
+  const chaveCache = 'falhas_' + t.nome.toLowerCase();
+  const falhas = Number(cache.get(chaveCache)) || 0;
+  if (falhas >= 5) return { ok: false, erro: 'Muitas tentativas. Aguarde 15 minutos e tente de novo.' };
+  let primeiroAcesso = false;
+  if (!t.senha) {
+    const trava = LockService.getScriptLock();
+    trava.waitLock(20000);
+    try {
+      t.aba.getRange(t.linha, 5).setNumberFormat('@').setValue(senha);
+      SpreadsheetApp.flush();
+    } finally {
+      trava.releaseLock();
+    }
+    primeiroAcesso = true;
+  } else if (senha !== t.senha) {
+    cache.put(chaveCache, String(falhas + 1), 900);
+    return { ok: false, erro: 'Senha incorreta.' };
+  }
+  cache.remove(chaveCache);
+  const ss = SpreadsheetApp.getActive();
+  const cfg = parametros_();
+  const placas = linhas_(ss.getSheetByName(ABA.VEICULOS)).filter(r => r[V.PLACA]).map(r => String(r[V.PLACA]));
+  return {
+    ok: true, primeiroAcesso, tecnico: t.nome, placa: placas.includes(t.placa) ? t.placa : '', placas,
+    config: { consumoKmL: cfg.consumo, antecedenciaKm: cfg.antecedencia, valorPadrao: cfg.valorPadrao,
+              lembreteInicio: cfg.lembreteInicio, lembreteFim: cfg.lembreteFim },
+  };
+}
+
+/** Funções chamadas pela versão web (google.script.run). Devolvem texto JSON. */
+function webConsultar(p) {
+  try { return JSON.stringify(consultar_(p || {})); } catch (err) { return JSON.stringify({ ok: false, erro: String(err) }); }
+}
+function webRegistrar(d) {
+  try { return JSON.stringify(registrar_(d || {})); } catch (err) { return JSON.stringify({ ok: false, erro: String(err) }); }
+}
+
 function chaveValida_(chave) {
   const esperada = PropertiesService.getScriptProperties().getProperty('CHAVE_APP') ||
     String(config_().getRange('B8').getValue()).trim();
@@ -680,3 +789,386 @@ document.querySelectorAll('button.excluir').forEach(b=>b.addEventListener('click
   .excluirVeiculo(CHAVE,placa);
 }));
 `;
+
+// ------------------------------------------------------------------ Versão web do técnico (iPhone)
+
+/**
+ * Página do técnico para iPhone (ou qualquer celular): <URL do app>?pagina=tecnico
+ * Mesmo login (nome + senha de 4 números) e mesmo fluxo do aplicativo Android.
+ */
+function paginaTecnico_() {
+  const cfg = { logo: LOGO_URL_, simbolo: SIMBOLO_URL_ };
+  const html = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Combustível GCM</title>' +
+    '<style>' + CSS_TECNICO_ + '</style></head><body><div id="app"></div>' +
+    '<script>const CFG=' + JSON.stringify(cfg) + ';(' + appTecnico_.toString() + ')();</script></body></html>';
+  const saida = HtmlService.createHtmlOutput(html).setTitle('Combustível GCM')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1');
+  try { saida.addMetaTag('apple-mobile-web-app-capable', 'yes'); } catch (err) { /* opcional */ }
+  try { saida.addMetaTag('mobile-web-app-capable', 'yes'); } catch (err) { /* opcional */ }
+  try { saida.setFaviconUrl(SIMBOLO_URL_); } catch (err) { /* opcional */ }
+  return saida;
+}
+
+const CSS_TECNICO_ = `
+:root{--marinho:#052545;--azul:#0E3A66;--magenta:#D1006C;--laranja:#FF7A12;--fundo:#F3F5F9;--texto:#14213D;--suave:#6B7588;
+--linha:#E3E7EE;--verde:#1B9E5A;--verde-c:#E5F6EC;--vermelho:#D32F2F;--vermelho-c:#FDECEC;--laranja-c:#FFF1E6}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;background:var(--fundo);color:var(--texto);font-size:16px}
+header{background:linear-gradient(135deg,var(--marinho),var(--azul));color:#fff;padding:16px;display:flex;align-items:center;gap:12px}
+header .marca{background:#fff;border-radius:14px;width:46px;height:46px;display:flex;align-items:center;justify-content:center;flex:none}
+header .marca img{width:34px}header h1{margin:0;font-size:20px}header p{margin:2px 0 0;opacity:.75;font-size:13px}
+header .voltar{background:none;border:0;color:#fff;font-size:26px;padding:0 6px 0 0;cursor:pointer}
+.faixa{height:4px;background:linear-gradient(90deg,var(--magenta),var(--laranja))}
+main{max-width:560px;margin:0 auto;padding:16px 16px 40px;display:grid;gap:14px}
+.cartao{background:#fff;border-radius:20px;padding:18px;box-shadow:0 1px 3px rgba(5,37,69,.08);display:grid;gap:12px}
+.cartao h2{margin:0;font-size:18px}
+.sub{color:var(--suave);font-size:14px;margin:0}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;border:0;border-radius:16px;padding:16px;font-size:17px;font-weight:700;cursor:pointer;
+background:linear-gradient(90deg,var(--magenta),var(--laranja));color:#fff;font-family:inherit}
+.btn:disabled{background:#C9CFD9;color:#fff}
+.btn.contorno{background:#fff;color:var(--texto);border:2px solid var(--linha)}
+.btn.vermelho{background:var(--vermelho)}.btn.verde{background:var(--verde)}
+.btn.pequeno{padding:10px 14px;font-size:15px;width:auto}
+.linha{display:flex;gap:10px}.linha>*{flex:1}
+.opcao{display:flex;align-items:center;gap:12px;width:100%;background:#fff;border:2px solid var(--linha);border-radius:14px;padding:16px;font-size:18px;font-weight:600;cursor:pointer;text-align:left;color:var(--texto);font-family:inherit}
+.opcao.sel{background:var(--laranja-c);border-color:var(--laranja)}
+input,textarea{width:100%;border:2px solid var(--linha);border-radius:14px;padding:14px;font-size:18px;font-weight:600;font-family:inherit;color:var(--texto);background:#fff}
+input:focus,textarea:focus{outline:none;border-color:var(--magenta)}
+label{font-size:14px;color:var(--suave);font-weight:600}
+.pin{letter-spacing:12px;text-align:center;font-size:28px}
+.aviso{border-radius:14px;padding:14px;font-weight:600}
+.aviso.ok{background:var(--verde-c);color:var(--verde)}.aviso.erro{background:var(--vermelho-c);color:var(--vermelho)}.aviso.atencao{background:var(--laranja-c);color:#B35400}
+.indicadores{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.ind{border-radius:14px;padding:14px;background:rgba(14,58,102,.07)}.ind small{color:var(--suave);font-size:13px}.ind b{display:block;font-size:24px;color:var(--azul)}
+.ind.mg{background:rgba(209,0,108,.07)}.ind.mg b{color:var(--magenta)}
+.etapa{display:flex;align-items:center;gap:14px;background:#fff;border:0;border-radius:20px;padding:16px;width:100%;box-shadow:0 1px 3px rgba(5,37,69,.08);cursor:pointer;text-align:left;font-family:inherit;color:var(--texto)}
+.etapa .bola{width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,var(--magenta),var(--laranja));color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;flex:none}
+.etapa.feito{background:var(--verde-c);box-shadow:none}.etapa.feito .bola{background:var(--verde)}
+.etapa b{display:block;font-size:18px}.etapa span{font-size:14px;color:var(--suave)}.etapa.feito span{color:var(--verde)}
+.foto{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;height:150px;border-radius:14px;background:var(--laranja-c);border:2px dashed rgba(255,122,18,.6);font-weight:700;cursor:pointer;color:var(--texto)}
+.foto .cam{width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,var(--magenta),var(--laranja));display:flex;align-items:center;justify-content:center;color:#fff;font-size:26px}
+.previa{width:100%;height:210px;object-fit:cover;border-radius:14px}
+.item{border-bottom:1px solid var(--linha);padding-bottom:12px;display:grid;gap:8px}.item:last-child{border:0;padding:0}
+.conds{display:flex;gap:6px}.conds button{flex:1;border:2px solid var(--linha);background:#fff;border-radius:12px;padding:10px 4px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--texto)}
+.conds button.ok{background:var(--verde-c);border-color:var(--verde);color:var(--verde)}
+.conds button.problema{background:var(--vermelho-c);border-color:var(--vermelho);color:var(--vermelho)}
+.conds button.naotem{background:var(--laranja-c);border-color:var(--laranja);color:#B35400}
+.carregando{height:4px;border-radius:4px;background:linear-gradient(90deg,var(--magenta),var(--laranja),var(--magenta));background-size:200% 100%;animation:c 1s linear infinite}
+@keyframes c{to{background-position:-200% 0}}
+.logo{display:block;width:220px;max-width:70%;margin:8px auto 0}
+.rodape{display:flex;gap:10px;justify-content:space-between;align-items:center}
+.link{background:none;border:0;color:var(--suave);font-size:15px;cursor:pointer;padding:8px;font-family:inherit}
+`;
+
+/** Código do navegador da página do técnico (enviado como texto; não roda no servidor). */
+function appTecnico_() {
+  const raiz = document.getElementById('app');
+  const DIAS = ['Início do turno', 'Abastecimento', 'Fim do turno'];
+  let sessao = null;
+  let estado = {};
+
+  function ler() { try { return JSON.parse(localStorage.getItem('gcm_sessao') || 'null'); } catch (e) { return null; } }
+  function gravar(s) { try { if (s) localStorage.setItem('gcm_sessao', JSON.stringify(s)); else localStorage.removeItem('gcm_sessao'); } catch (e) { /* sem armazenamento */ } }
+  function E(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+  function km(v) { return (Number(v) || 0).toLocaleString('pt-BR', { maximumFractionDigits: 0 }) + ' km'; }
+  function reais(v) { return (Number(v) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }); }
+  function num(t) { const n = parseFloat(String(t || '').replace(/\./g, '').replace(',', '.')); return isNaN(n) ? null : n; }
+  function hojeBr() { return new Date().toLocaleDateString('pt-BR'); }
+
+  function chamar(fn, arg) {
+    return new Promise((ok, falha) => {
+      google.script.run.withSuccessHandler(t => {
+        let r; try { r = JSON.parse(t); } catch (e) { falha(new Error('Resposta inválida do sistema.')); return; }
+        if (!r.ok) {
+          if (String(r.erro || '').indexOf('Entre novamente') === 0 && sessao) { sair('Sua senha mudou. Entre novamente.'); }
+          falha(new Error(r.erro || 'Erro no sistema.')); return;
+        }
+        ok(r);
+      }).withFailureHandler(e => falha(new Error('Sem conexão com o sistema. Verifique a internet e tente de novo.')))[fn](arg);
+    });
+  }
+  function credenciais(extra) { return Object.assign({ tecnico: sessao.tecnico, senha: sessao.senha, placa: sessao.placa }, extra || {}); }
+
+  function tela(titulo, subtitulo, corpo, voltar) {
+    raiz.innerHTML = '<header>' + (voltar ? '<button class="voltar" data-acao="voltar" aria-label="Voltar">‹</button>' :
+      '<div class="marca"><img src="' + E(CFG.simbolo) + '" alt="GCM" onerror="this.remove()"></div>') +
+      '<div><h1>' + E(titulo) + '</h1><p>' + E(subtitulo) + '</p></div></header><div class="faixa"></div><main>' + corpo + '</main>';
+    window.scrollTo(0, 0);
+  }
+  const ac = {};
+  raiz.addEventListener('click', ev => {
+    const b = ev.target.closest('[data-acao]');
+    if (!b || b.disabled) return;
+    const f = ac[b.dataset.acao];
+    if (f) f(b);
+  });
+
+  // ---------------------------------------------------------------- Login
+  function sair(msg) { gravar(null); sessao = null; telaLogin(msg); }
+
+  function telaLogin(msg) {
+    estado = { login: { tecnicos: null, escolhido: null } };
+    tela('Combustível GCM', 'Entrar', '<img class="logo" src="' + E(CFG.logo) + '" alt="GCM Serviços" onerror="this.remove()">' +
+      '<div class="cartao" id="login"><h2>Quem é você?</h2><div class="carregando"></div></div>' + (msg ? '<div class="aviso atencao">' + E(msg) + '</div>' : ''), false);
+    chamar('webConsultar', { acao: 'tecnicos' }).then(r => { estado.login.tecnicos = r.tecnicos; desenharLogin(); })
+      .catch(e => { document.getElementById('login').innerHTML = '<h2>Quem é você?</h2><div class="aviso erro">' + E(e.message) + '</div><button class="btn contorno" data-acao="recarregarLogin">Tentar de novo</button>'; });
+  }
+  ac.recarregarLogin = () => telaLogin();
+
+  function desenharLogin(erro) {
+    const L = estado.login;
+    const t = L.escolhido;
+    let h = '<h2>Quem é você?</h2>';
+    if (!L.tecnicos.length) h += '<div class="aviso erro">Nenhum técnico cadastrado. Peça ao responsável para cadastrar você.</div>';
+    L.tecnicos.forEach((x, i) => { h += '<button class="opcao' + (t === x ? ' sel' : '') + '" data-acao="escolher" data-i="' + i + '">👤 ' + E(x.nome) + '</button>'; });
+    if (t) {
+      if (t.temSenha) {
+        h += '<label for="senha">Sua senha (4 números)</label><input id="senha" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="current-password">';
+      } else {
+        h += '<div class="aviso atencao">Primeiro acesso: crie uma senha de 4 números. Ela será pedida só ao entrar.</div>' +
+          '<label for="senha">Nova senha (4 números)</label><input id="senha" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password">' +
+          '<label for="senha2">Repita a senha</label><input id="senha2" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password">';
+      }
+      if (erro) h += '<div class="aviso erro">' + E(erro) + '</div>';
+      h += '<button class="btn" data-acao="entrar">Entrar</button>';
+    }
+    document.getElementById('login').innerHTML = h;
+    const s = document.getElementById('senha'); if (s) s.focus();
+  }
+  ac.escolher = b => { estado.login.escolhido = estado.login.tecnicos[Number(b.dataset.i)]; desenharLogin(); };
+  ac.entrar = b => {
+    const t = estado.login.escolhido;
+    const senha = (document.getElementById('senha').value || '').trim();
+    const s2 = document.getElementById('senha2');
+    if (!/^[0-9]{4}$/.test(senha)) { desenharLogin('A senha deve ter 4 números.'); return; }
+    if (s2 && s2.value.trim() !== senha) { desenharLogin('As senhas não são iguais.'); return; }
+    b.disabled = true; b.textContent = 'Entrando...';
+    chamar('webRegistrar', { tipo: 'login', tecnico: t.nome, senha }).then(r => {
+      sessao = { tecnico: r.tecnico, senha, placa: r.placa || (r.placas.length === 1 ? r.placas[0] : '') };
+      if (sessao.placa) { gravar(sessao); telaInicio(r.primeiroAcesso ? 'Senha criada. Bem-vindo!' : ''); }
+      else telaVeiculo(r.placas);
+    }).catch(e => desenharLogin(e.message));
+  };
+
+  function telaVeiculo(placas) {
+    estado.placas = placas;
+    tela('Combustível GCM', sessao.tecnico, '<div class="cartao"><h2>Qual veículo você usa?</h2>' +
+      (placas.length ? placas.map((p, i) => '<button class="opcao" data-acao="placa" data-i="' + i + '">🚗 ' + E(p) + '</button>').join('') :
+        '<div class="aviso erro">Nenhum veículo cadastrado. Fale com o responsável.</div>') + '</div>', false);
+  }
+  ac.placa = b => { sessao.placa = estado.placas[Number(b.dataset.i)]; gravar(sessao); telaInicio(); };
+
+  // ---------------------------------------------------------------- Início
+  function telaInicio(msg) {
+    estado = { msg: msg || '' };
+    tela('Olá, ' + sessao.tecnico.split(' ')[0], 'Veículo ' + sessao.placa + ' · ' + hojeBr(), '<div id="conteudo"><div class="carregando"></div></div>', false);
+    chamar('webConsultar', credenciais()).then(r => {
+      estado.r = r;
+      estado.veiculo = (r.veiculos || []).find(v => v.placa === sessao.placa) || null;
+      desenharInicio();
+    }).catch(e => {
+      const c = document.getElementById('conteudo');
+      if (c) c.innerHTML = '<div class="aviso erro">' + E(e.message) + '</div><button class="btn contorno" data-acao="atualizar">Tentar de novo</button>';
+    });
+  }
+  ac.atualizar = () => telaInicio();
+  ac.sair = () => { if (confirm('Sair e entrar com outro técnico?')) sair(); };
+
+  function desenharInicio() {
+    const h = estado.r.hoje || {};
+    const v = estado.veiculo;
+    let x = '';
+    if (estado.msg) x += '<div class="aviso ok">' + E(estado.msg).replace(/\n/g, '<br>') + '</div>';
+    if (h.emManutencao) {
+      x += '<div class="cartao" style="background:var(--vermelho-c)"><h2 style="color:var(--vermelho)">🔧 Veículo em manutenção</h2>' +
+        '<p class="sub">Quando o veículo voltar a funcionar, toque no botão abaixo.</p><button class="btn verde" data-acao="voltouFuncionar">O veículo voltou a funcionar</button></div>';
+    } else if (!h.checagemFeita) {
+      x += '<div class="cartao" id="checagem"><h2>O veículo está funcionando corretamente?</h2><div class="linha">' +
+        '<button class="btn verde" data-acao="funciona">Sim</button><button class="btn contorno" data-acao="naoFunciona">Não</button></div></div>';
+    }
+    x += '<div class="cartao"><h2>Resumo de hoje</h2><div class="indicadores"><div class="ind"><small>Km rodados</small><b>' + km(h.kmRodados) +
+      '</b></div><div class="ind mg"><small>Combustível gasto</small><b>' + reais(h.gasto) + '</b></div></div>' +
+      '<p class="sub">' + (h.precoLitro > 0 ? km(h.kmRodados) + ' ÷ ' + (estado.r.config.consumoKmL || 10) + ' km/l = ' + (h.litros || 0).toLocaleString('pt-BR') + ' litros × ' + reais(h.precoLitro) + ' por litro'
+        : 'O gasto aparece depois do primeiro abastecimento registrado.') + '</p></div>';
+    if (v) {
+      if (v.situacao === 'Abastecer') x += '<div class="aviso erro">⛽ Abasteça o veículo: restam ' + km(v.kmRestantes) + '.</div>';
+      else if (v.situacao === 'OK') x += '<div class="aviso ok">⛽ Tanque: restam cerca de ' + km(v.kmRestantes) + '.</div>';
+      const s = v.seguro || {};
+      if (s.situacao === 'Vencido') x += '<div class="aviso erro">Seguro obrigatório vencido em ' + E(s.vencimento) + '.</div>';
+      else if (s.situacao === 'Vence em breve') x += '<div class="aviso atencao">Seguro obrigatório vence em ' + E(s.vencimento) + ' (' + s.diasRestantes + ' dias).</div>';
+      const o = v.oleo || {};
+      if (o.situacao && o.situacao !== 'Sem registro') {
+        x += '<div class="cartao"><h2>🛢️ Troca de óleo</h2><p class="sub">' + E(o.situacao) + ' · próxima em ' + km(o.proximaTrocaKm) +
+          (o.kmFaltando < 0 ? ' (passou ' + km(-o.kmFaltando) + ')' : ' (faltam ' + km(o.kmFaltando) + ')') + '</p>' +
+          (o.agendadaPara ? '<div class="aviso ok">Agendada para ' + E(o.agendadaPara) + '</div>' : '') +
+          (o.situacao !== 'Em dia' || o.agendadaPara ? '<label for="dataOleo">' + (o.agendadaPara ? 'Mudar a data' : 'Agendar a troca de óleo') + '</label><input id="dataOleo" type="date" value="' + E(o.agendadaIso || '') + '"><button class="btn contorno" data-acao="agendarOleo">Salvar data</button>' : '') + '</div>';
+      }
+    }
+    const pend = (estado.r.checklists || []).filter(c => !c.feitoNaSemana);
+    if (pend.length) x += '<div class="aviso atencao">📋 Check-list da semana pendente: ' + E(pend.map(c => c.nome).join(' e ')) + '.</div>';
+    x += '<h2 style="margin:6px 0 0;font-size:18px">Etapas do dia</h2>';
+    const feitos = [h.inicioFeito, h.abastecimentoFeito, h.fimFeito];
+    const desc = ['8h · foto do painel e km', 'Nota fiscal, valor, litros e km', '17h · foto do painel e km'];
+    DIAS.forEach((d, i) => {
+      x += '<button class="etapa' + (feitos[i] ? ' feito' : '') + '" data-acao="etapa" data-i="' + i + '"><div class="bola">' + (feitos[i] ? '✓' : (i + 1)) +
+        '</div><div><b>' + (i + 1) + '. ' + d + '</b><span>' + (feitos[i] ? 'Concluído hoje' : desc[i]) + '</span></div></button>';
+    });
+    x += '<h2 style="margin:6px 0 0;font-size:18px">Check-lists da semana</h2>';
+    (estado.r.checklists || []).forEach((c, i) => {
+      x += '<button class="etapa' + (c.feitoNaSemana ? ' feito' : '') + '" data-acao="checklist" data-i="' + i + '"><div class="bola">' + (c.feitoNaSemana ? '✓' : '📋') +
+        '</div><div><b>' + E(c.nome) + '</b><span>' + (c.feitoNaSemana ? 'Feito nesta semana' : 'Pendente nesta semana') + (c.ultimoEm ? ' · último ' + E(c.ultimoEm) : '') + '</span></div></button>';
+    });
+    let dica = false; try { dica = !localStorage.getItem('gcm_dica') && !window.navigator.standalone; } catch (e) { dica = false; }
+    if (dica) x += '<div class="cartao"><h2>📲 Deixe na tela do celular</h2><p class="sub">No iPhone, abra este endereço no Safari, toque em Compartilhar e depois em "Adicionar à Tela de Início". Assim o app fica com ícone, igual a um aplicativo.</p><button class="btn contorno pequeno" data-acao="dicaOk">Entendi</button></div>';
+    x += '<div class="rodape"><button class="btn contorno pequeno" data-acao="atualizar">↻ Atualizar</button><button class="link" data-acao="sair">Trocar técnico</button></div>';
+    document.getElementById('conteudo').innerHTML = x;
+  }
+  ac.dicaOk = () => { try { localStorage.setItem('gcm_dica', '1'); } catch (e) { /* ok */ } desenharInicio(); };
+
+  function enviarChecagem(funcionando, descricao, b) {
+    b.disabled = true;
+    return chamar('webRegistrar', credenciais({ tipo: 'checagem', funcionando, descricao: descricao || '' }))
+      .then(() => telaInicio(funcionando ? 'Obrigado! Bom trabalho.' : 'Veículo marcado como em manutenção. O responsável foi avisado.'))
+      .catch(e => { b.disabled = false; alert(e.message); });
+  }
+  ac.funciona = b => enviarChecagem(true, '', b);
+  ac.voltouFuncionar = b => enviarChecagem(true, 'Voltou a funcionar', b);
+  ac.naoFunciona = () => {
+    document.getElementById('checagem').innerHTML = '<h2>O que aconteceu com o veículo?</h2><textarea id="problema" rows="3" placeholder="Descreva o problema (opcional)"></textarea>' +
+      '<button class="btn vermelho" data-acao="manutencao">🔧 Veículo em manutenção</button><button class="link" data-acao="atualizar">Cancelar</button>';
+  };
+  ac.manutencao = b => enviarChecagem(false, document.getElementById('problema').value, b);
+  ac.agendarOleo = b => {
+    const d = document.getElementById('dataOleo').value;
+    if (!d) { alert('Escolha a data.'); return; }
+    b.disabled = true;
+    chamar('webRegistrar', credenciais({ tipo: 'agendar_oleo', data: d })).then(() => telaInicio('Troca de óleo agendada.'))
+      .catch(e => { b.disabled = false; alert(e.message); });
+  };
+
+  // ---------------------------------------------------------------- Registro (início, abastecimento, fim)
+  function carimbar(arquivo, largura) {
+    return new Promise((ok, falha) => {
+      const url = URL.createObjectURL(arquivo);
+      const img = new Image();
+      img.onload = () => {
+        const esc = Math.min(1, largura / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.width * esc); c.height = Math.round(img.height * esc);
+        const g = c.getContext('2d');
+        g.drawImage(img, 0, 0, c.width, c.height);
+        const t = new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + '  ' + sessao.tecnico + '  ' + sessao.placa;
+        const fs = Math.max(16, Math.round(c.width / 32));
+        g.font = 'bold ' + fs + 'px sans-serif';
+        g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(0, c.height - fs * 1.8, c.width, fs * 1.8);
+        g.fillStyle = '#fff'; g.fillText(t, fs * 0.6, c.height - fs * 0.6);
+        URL.revokeObjectURL(url);
+        ok(c.toDataURL('image/jpeg', 0.8));
+      };
+      img.onerror = () => falha(new Error('Não foi possível abrir a foto.'));
+      img.src = url;
+    });
+  }
+
+  function blocoFoto(id, rotulo, foto) {
+    return '<input type="file" accept="image/*" capture="environment" id="arq_' + id + '" data-foto="' + id + '" hidden>' +
+      (foto ? '<img class="previa" src="' + foto + '" alt=""><label class="btn contorno" for="arq_' + id + '">📷 Tirar outra foto</label>'
+        : '<label class="foto" for="arq_' + id + '"><span class="cam">📷</span>' + E(rotulo) + '</label>');
+  }
+
+  function telaRegistro(i) {
+    estado = { etapa: i, fotos: {}, valor: String((estado.r && estado.r.config && estado.r.config.valorPadrao) || 180).replace('.', ','), litros: '', km: '' };
+    desenharRegistro();
+  }
+  ac.etapa = b => telaRegistro(Number(b.dataset.i));
+  ac.voltar = () => telaInicio();
+
+  function desenharRegistro(erro) {
+    const s = estado; const abast = s.etapa === 1;
+    let x = '';
+    if (abast) {
+      x += '<div class="cartao"><h2>1. Nota fiscal</h2>' + blocoFoto('nota', 'Fotografar a nota fiscal', s.fotos.nota);
+      if (s.fotos.nota) x += '<label for="valor">Valor colocado (R$)</label><input id="valor" inputmode="decimal" value="' + E(s.valor) + '">' +
+        '<label for="litros">Litros que couberam no tanque</label><input id="litros" inputmode="decimal" value="' + E(s.litros) + '">';
+      x += '</div>';
+    }
+    x += '<div class="cartao"><h2>' + (abast ? '2. ' : '') + 'Km do painel</h2>' + blocoFoto('painel', 'Fotografar o painel', s.fotos.painel);
+    if (s.fotos.painel) x += '<label for="km">Digite o km que aparece no painel</label><input id="km" inputmode="numeric" pattern="[0-9]*" value="' + E(s.km) + '">';
+    x += '</div>';
+    if (erro) x += '<div class="aviso erro">' + E(erro) + '</div>';
+    x += '<button class="btn" data-acao="enviarRegistro" style="padding:20px">✓ ' + ['OK', 'Enviar abastecimento', 'Encerrar turno'][s.etapa] + '</button>';
+    tela(DIAS[s.etapa], 'Etapa ' + (s.etapa + 1) + ' de 3 · ' + hojeBr(), x, true);
+  }
+  function guardarCampos() {
+    ['valor', 'litros', 'km'].forEach(k => { const el = document.getElementById(k); if (el) estado[k] = el.value; });
+  }
+  raiz.addEventListener('change', ev => {
+    const el = ev.target;
+    if (!el.dataset || !el.dataset.foto || !el.files || !el.files[0]) return;
+    guardarCampos();
+    carimbar(el.files[0], el.dataset.foto === 'nota' ? 1600 : 1280)
+      .then(d => { estado.fotos[el.dataset.foto] = d; desenharRegistro(); })
+      .catch(e => desenharRegistro(e.message));
+  });
+  ac.enviarRegistro = b => {
+    guardarCampos();
+    const s = estado; const abast = s.etapa === 1;
+    const kmN = parseInt(String(s.km).replace(/[^0-9]/g, ''), 10);
+    if (abast && !s.fotos.nota) return desenharRegistro('Fotografe a nota fiscal.');
+    if (!s.fotos.painel) return desenharRegistro('Fotografe o painel.');
+    if (!(kmN > 0)) return desenharRegistro('Digite o km do painel.');
+    const corpo = credenciais({ km: kmN, origem: 'Digitado (versão web)' });
+    if (abast) {
+      const v = num(s.valor), l = num(s.litros);
+      if (!(v > 0)) return desenharRegistro('Digite o valor colocado.');
+      if (!(l > 0)) return desenharRegistro('Digite os litros que couberam no tanque.');
+      const consumo = (estado.r && estado.r.config && estado.r.config.consumoKmL) || 10;
+      Object.assign(corpo, { tipo: 'abastecimento', valor: v, litros: l, kmCoube: Math.round(l * consumo),
+        fotoBase64: s.fotos.nota.split(',')[1], fotoPainelBase64: s.fotos.painel.split(',')[1] });
+    } else {
+      Object.assign(corpo, { tipo: 'leitura', periodo: s.etapa === 0 ? 'Início do dia' : 'Fim do dia', fotoBase64: s.fotos.painel.split(',')[1] });
+    }
+    b.disabled = true; b.textContent = 'Enviando...';
+    chamar('webRegistrar', corpo).then(r => {
+      const partes = [['Início do turno registrado. Bom trabalho!', 'Abastecimento registrado.', 'Turno encerrado.'][s.etapa]];
+      if (r.hoje && (s.etapa === 2 || r.hoje.kmRodados > 0)) partes.push('Hoje você rodou ' + km(r.hoje.kmRodados) + ' e gastou ' + reais(r.hoje.gasto) + ' de combustível.');
+      if (r.situacao && r.situacao.situacao === 'Abastecer') partes.push('Atenção: o veículo precisa ser abastecido (restam ' + km(r.situacao.kmRestantes) + '). O responsável foi avisado.');
+      telaInicio(partes.join('\n'));
+    }).catch(e => desenharRegistro('Não foi possível enviar: ' + e.message));
+  };
+
+  // ---------------------------------------------------------------- Check-lists
+  ac.checklist = b => {
+    const c = estado.r.checklists[Number(b.dataset.i)];
+    estado = { r: estado.r, lista: c, resp: c.itens.map(() => ({ condicao: '', observacao: '' })) };
+    desenharChecklist();
+  };
+  function desenharChecklist(erro) {
+    const c = estado.lista;
+    let x = '<div class="cartao"><p class="sub">Marque a condição de cada item.</p><button class="btn contorno pequeno" data-acao="restantesOk">Marcar os restantes como OK</button></div><div class="cartao">';
+    c.itens.forEach((it, i) => {
+      const r = estado.resp[i];
+      x += '<div class="item"><b>' + E(it) + '</b><div class="conds">' +
+        [['OK', 'ok'], ['Com problema', 'problema'], ['Não tem', 'naotem']].map(p => '<button data-acao="cond" data-i="' + i + '" data-c="' + p[0] + '" class="' + (r.condicao === p[0] ? p[1] : '') + '">' + p[0] + '</button>').join('') + '</div>' +
+        (r.condicao && r.condicao !== 'OK' ? '<input data-obs="' + i + '" placeholder="Observação (opcional)" value="' + E(r.observacao) + '">' : '') + '</div>';
+    });
+    x += '</div>' + (erro ? '<div class="aviso erro">' + E(erro) + '</div>' : '') + '<button class="btn" data-acao="enviarChecklist">Enviar check-list</button>';
+    tela(c.nome, 'Check-list semanal · ' + hojeBr(), x, true);
+  }
+  function guardarObs() { raiz.querySelectorAll('[data-obs]').forEach(el => { estado.resp[Number(el.dataset.obs)].observacao = el.value; }); }
+  ac.cond = b => { guardarObs(); estado.resp[Number(b.dataset.i)].condicao = b.dataset.c; const y = window.scrollY; desenharChecklist(); window.scrollTo(0, y); };
+  ac.restantesOk = () => { guardarObs(); estado.resp.forEach(r => { if (!r.condicao) r.condicao = 'OK'; }); const y = window.scrollY; desenharChecklist(); window.scrollTo(0, y); };
+  ac.enviarChecklist = b => {
+    guardarObs();
+    if (estado.resp.some(r => !r.condicao)) return desenharChecklist('Marque todos os itens.');
+    b.disabled = true; b.textContent = 'Enviando...';
+    const itens = estado.lista.itens.map((it, i) => ({ item: it, condicao: estado.resp[i].condicao, observacao: estado.resp[i].observacao }));
+    chamar('webRegistrar', credenciais({ tipo: 'checklist', checklist: estado.lista.nome, itens }))
+      .then(r => telaInicio('Check-list enviado.' + (r.problemas ? ' ' + r.problemas + ' item(ns) com problema; o responsável foi avisado.' : '')))
+      .catch(e => desenharChecklist(e.message));
+  };
+
+  // ---------------------------------------------------------------- Começo
+  sessao = ler();
+  if (sessao && sessao.tecnico && sessao.senha && sessao.placa) telaInicio(); else telaLogin();
+}

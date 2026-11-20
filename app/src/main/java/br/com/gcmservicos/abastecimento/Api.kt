@@ -12,9 +12,10 @@ import java.net.URLEncoder
 /** Comunicação com o Google Apps Script publicado como app da Web. */
 object Api {
 
-    suspend fun consultar(url: String, chave: String): JSONObject = withContext(Dispatchers.IO) {
+    /** Consulta com a senha do técnico (o nome do técnico já vai no endereço). */
+    suspend fun consultar(url: String, senha: String): JSONObject = withContext(Dispatchers.IO) {
         val sep = if (url.contains("?")) "&" else "?"
-        verificar(requisicao(url + sep + "chave=" + URLEncoder.encode(chave, "UTF-8"), null))
+        verificar(requisicao(url + sep + "senha=" + URLEncoder.encode(senha, "UTF-8"), null))
     }
 
     suspend fun enviar(url: String, corpo: JSONObject): JSONObject = withContext(Dispatchers.IO) {
