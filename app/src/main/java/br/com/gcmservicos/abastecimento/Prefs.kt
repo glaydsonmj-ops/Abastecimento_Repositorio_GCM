@@ -9,9 +9,10 @@ class Prefs(context: Context) {
     var url: String
         get() = sp.getString("url", null)?.takeIf { it.isNotBlank() } ?: Sistema.URL
         set(v) = sp.edit().putString("url", v.trim()).apply()
-    var chave: String
-        get() = sp.getString("chave", null)?.takeIf { it.isNotBlank() } ?: Sistema.CHAVE
-        set(v) = sp.edit().putString("chave", v.trim()).apply()
+    /** Senha de 4 números do técnico (criada no primeiro acesso). */
+    var senha: String
+        get() = sp.getString("senha", "") ?: ""
+        set(v) = sp.edit().putString("senha", v.trim()).apply()
     var tecnico: String
         get() = sp.getString("tecnico", "") ?: ""
         set(v) = sp.edit().putString("tecnico", v).apply()
@@ -32,7 +33,7 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putString("lembreteFim", v).apply()
 
     val configurado: Boolean
-        get() = url.isNotBlank() && chave.isNotBlank() && tecnico.isNotBlank() && placa.isNotBlank()
+        get() = url.isNotBlank() && senha.isNotBlank() && tecnico.isNotBlank() && placa.isNotBlank()
 
     // Situação da troca de óleo guardada no aparelho, usada no alerta das 8h.
     var oleoSituacao: String

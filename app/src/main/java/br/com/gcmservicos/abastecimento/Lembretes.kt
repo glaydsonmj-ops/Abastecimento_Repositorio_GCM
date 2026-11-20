@@ -183,7 +183,7 @@ class LembreteReceiver : BroadcastReceiver() {
             runBlocking {
                 withTimeoutOrNull(8_000) {
                     val url = prefs.url + "?tecnico=" + Uri.encode(prefs.tecnico) + "&placa=" + Uri.encode(prefs.placa)
-                    val r = Api.consultar(url, prefs.chave)
+                    val r = Api.consultar(url, prefs.senha)
                     val vs = r.optJSONArray("veiculos") ?: return@withTimeoutOrNull
                     for (i in 0 until vs.length()) {
                         val v = vs.getJSONObject(i)

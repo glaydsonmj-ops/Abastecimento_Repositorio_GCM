@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -134,7 +135,7 @@ private fun App(pedido: MutableState<String?>) {
     val hojeTexto = SimpleDateFormat("dd/MM/yyyy", BR).format(Date())
     Column(Modifier.fillMaxSize()) {
         when (val t = tela) {
-            Tela.Escolher -> Cabecalho("Abastecimento GCM", "Identificação do técnico", if (podeVoltar) ({ tela = Tela.Inicio }) else null)
+            Tela.Escolher -> Cabecalho("Combustível GCM", "Entrar", if (podeVoltar) ({ tela = Tela.Inicio }) else null)
             Tela.Inicio -> Cabecalho("Olá, ${prefs.tecnico.substringBefore(' ')}", "Veículo ${prefs.placa} · $hojeTexto", null)
             is Tela.Registro -> Cabecalho(t.etapa.titulo, "Etapa ${t.etapa.numero} de 3 · $hojeTexto") { tela = Tela.Inicio }
             Tela.Checklists -> Cabecalho("Check-lists", "Segurança do veículo, ferramental e EPI", null)
@@ -145,7 +146,7 @@ private fun App(pedido: MutableState<String?>) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (val t = tela) {
                 Tela.Escolher -> TelaEscolher(prefs) { Lembretes.agendar(ctx); tela = Tela.Inicio }
-                Tela.Inicio -> TelaInicio(prefs, aviso, { aviso = null; tela = Tela.Registro(it) }, { tela = Tela.Escolher }, { aviso = null; tela = Tela.Checklists })
+                Tela.Inicio -> TelaInicio(prefs, aviso, { aviso = null; tela = Tela.Registro(it) }, { prefs.senha = ""; aviso = null; tela = Tela.Escolher }, { aviso = null; tela = Tela.Checklists })
                 is Tela.Registro -> TelaRegistro(prefs, t.etapa) { msg -> aviso = msg; tela = Tela.Inicio }
                 Tela.Checklists -> TelaChecklists(prefs, aviso) { nome, itens -> aviso = null; tela = Tela.Checklist(nome, itens) }
                 Tela.Relatorio -> TelaRelatorio(prefs)
@@ -240,84 +241,114 @@ internal fun Campo(valor: String, aoMudar: (String) -> Unit, rotulo: String, tec
 
 @Composable
 private fun TelaEscolher(prefs: Prefs, aoConcluir: () -> Unit) {
+    val escopo = rememberCoroutineScope()
     var carregando by remember { mutableStateOf(true) }
     var erro by remember { mutableStateOf<String?>(null) }
     var tecnicos by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var escolhido by remember { mutableStateOf<JSONObject?>(null) }
+    var senha by remember { mutableStateOf("") }
+    var senha2 by remember { mutableStateOf("") }
     var placas by remember { mutableStateOf<List<String>>(emptyList()) }
-    var tecnico by remember { mutableStateOf(prefs.tecnico) }
-    var placa by remember { mutableStateOf(prefs.placa) }
+    var placa by remember { mutableStateOf("") }
+    var logado by remember { mutableStateOf(false) }
     var tentativa by remember { mutableIntStateOf(0) }
-    var temChave by remember { mutableStateOf(prefs.chave.isNotBlank()) }
-    var chaveTexto by remember { mutableStateOf("") }
-
-    if (!temChave) {
-        Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            LogoGcm(Modifier.fillMaxWidth().height(170.dp).padding(top = 8.dp))
-            Cartao {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Filled.Lock, contentDescription = null, tint = Cores.MAGENTA)
-                    Text("Chave de acesso", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                }
-                Text("Digite a chave fornecida pelo responsável. Isso é pedido só uma vez.", color = Cores.SUAVE)
-                Campo(chaveTexto, { chaveTexto = it.trim() }, "Chave", KeyboardType.Text)
-                BotaoMarca("Continuar", { prefs.chave = chaveTexto; temChave = true }, habilitado = chaveTexto.isNotBlank())
-            }
-        }
-        return
-    }
 
     LaunchedEffect(tentativa) {
         carregando = true; erro = null
         try {
-            val r = Api.consultar(prefs.url, prefs.chave)
+            val r = Api.consultar(prefs.url + "?acao=tecnicos", "")
             val ts = r.getJSONArray("tecnicos")
             tecnicos = (0 until ts.length()).map { ts.getJSONObject(it) }
-            val vs = r.getJSONArray("veiculos")
-            placas = (0 until vs.length()).map { vs.getJSONObject(it).optString("placa") }
-            r.optJSONObject("config")?.let { c ->
-                prefs.consumoKmL = c.optDouble("consumoKmL", 10.0)
-                prefs.valorPadrao = c.optDouble("valorPadrao", 180.0)
-                prefs.lembreteInicio = c.optString("lembreteInicio", "08:00")
-                prefs.lembreteFim = c.optString("lembreteFim", "17:00")
-            }
-            if (placa.isBlank() && placas.size == 1) placa = placas.first()
+            escolhido = tecnicos.firstOrNull { it.optString("nome") == prefs.tecnico }
             if (tecnicos.isEmpty()) erro = "Nenhum técnico cadastrado. Peça ao responsável para cadastrar você na planilha."
         } catch (e: Exception) {
-            erro = if (e.message?.contains("Chave", ignoreCase = true) == true) "Chave de acesso inválida." else "Sem conexão com o sistema. Verifique a internet e tente de novo."
+            erro = "Sem conexão com o sistema. Verifique a internet e tente de novo."
         } finally {
             carregando = false
         }
     }
 
+    fun concluir(nome: String, p: String) {
+        prefs.tecnico = nome; prefs.senha = senha; prefs.placa = p
+        aoConcluir()
+    }
+
     Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         LogoGcm(Modifier.fillMaxWidth().height(130.dp))
+        if (logado) {
+            // Técnico sem veículo definido na planilha: escolhe o veículo uma vez.
+            Text("Qual veículo você usa?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            placas.forEach { p -> CartaoOpcao(p, null, placa == p) { placa = p } }
+            BotaoMarca("Continuar", { concluir(escolhido?.optString("nome") ?: "", placa) }, habilitado = placa.isNotBlank())
+            return@Column
+        }
         Text("Quem é você?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         if (carregando) LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = Cores.MAGENTA)
-        erro?.let {
-            Erro(it)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { tentativa++ }, shape = CANTO_CAMPO) { Text("Tentar de novo") }
-                TextButton(onClick = { prefs.chave = ""; temChave = false }) { Text("Trocar chave") }
-            }
+        if (tecnicos.isEmpty() && erro != null) {
+            Erro(erro!!)
+            OutlinedButton(onClick = { tentativa++ }, shape = CANTO_CAMPO) { Text("Tentar de novo") }
         }
         tecnicos.forEach { t ->
             val nome = t.optString("nome")
-            CartaoOpcao(nome, Icons.Filled.Person, tecnico == nome) {
-                tecnico = nome
-                t.optString("placa").takeIf { it.isNotBlank() }?.let { placa = it }
+            CartaoOpcao(nome, Icons.Filled.Person, escolhido?.optString("nome") == nome) {
+                escolhido = t; senha = ""; senha2 = ""; erro = null
             }
         }
-        if (tecnicos.isNotEmpty() && placas.size > 1) {
-            Text("Veículo", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            placas.forEach { p -> CartaoOpcao(p, null, placa == p) { placa = p } }
-        }
-        if (tecnicos.isNotEmpty()) {
-            BotaoMarca(
-                "Continuar", { prefs.tecnico = tecnico; prefs.placa = placa; aoConcluir() },
-                habilitado = tecnico.isNotBlank() && placa.isNotBlank()
-            )
+        val t = escolhido
+        if (t != null) {
+            val primeiro = !t.optBoolean("temSenha")
+            Cartao {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Filled.Lock, contentDescription = null, tint = Cores.MAGENTA)
+                    Text(if (primeiro) "Crie sua senha" else "Sua senha", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                }
+                if (primeiro) Text("Primeiro acesso: escolha 4 números. Ela será pedida só ao entrar.", color = Cores.SUAVE)
+                CampoSenha(senha, { senha = it }, if (primeiro) "Nova senha (4 números)" else "Senha (4 números)")
+                if (primeiro) CampoSenha(senha2, { senha2 = it }, "Repita a senha")
+                if (tecnicos.isNotEmpty()) erro?.let { Erro(it) }
+                BotaoMarca(
+                    if (carregando) "Entrando..." else "Entrar",
+                    {
+                        if (primeiro && senha != senha2) { erro = "As senhas não são iguais."; return@BotaoMarca }
+                        carregando = true; erro = null
+                        escopo.launch {
+                            try {
+                                val r = Api.enviar(prefs.url, JSONObject().put("tipo", "login").put("tecnico", t.optString("nome")).put("senha", senha))
+                                r.optJSONObject("config")?.let { c ->
+                                    prefs.consumoKmL = c.optDouble("consumoKmL", 10.0)
+                                    prefs.valorPadrao = c.optDouble("valorPadrao", 180.0)
+                                    prefs.lembreteInicio = c.optString("lembreteInicio", "08:00")
+                                    prefs.lembreteFim = c.optString("lembreteFim", "17:00")
+                                }
+                                val nome = r.optString("tecnico", t.optString("nome"))
+                                val ps = r.optJSONArray("placas")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
+                                val definida = r.optString("placa").ifBlank { if (ps.size == 1) ps.first() else "" }
+                                if (definida.isNotBlank()) concluir(nome, definida)
+                                else if (ps.isEmpty()) erro = "Nenhum veículo cadastrado. Fale com o responsável."
+                                else { placas = ps; placa = prefs.placa.takeIf { it in ps } ?: ""; logado = true }
+                            } catch (e: Exception) {
+                                erro = e.message ?: "Sem conexão com o sistema."
+                            } finally {
+                                carregando = false
+                            }
+                        }
+                    },
+                    habilitado = !carregando && senha.length == 4 && (!primeiro || senha2.length == 4)
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun CampoSenha(valor: String, aoMudar: (String) -> Unit, rotulo: String) {
+    OutlinedTextField(
+        valor, { aoMudar(it.filter(Char::isDigit).take(4)) }, label = { Text(rotulo) }, singleLine = true, shape = CANTO_CAMPO,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+        visualTransformation = PasswordVisualTransformation(),
+        textStyle = LocalTextStyle.current.copy(fontSize = 24.sp, fontWeight = FontWeight.Bold, letterSpacing = 8.sp),
+        modifier = Modifier.fillMaxWidth()
+    )
 }
 
 @Composable
@@ -350,7 +381,7 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
         erro = null
         try {
             val url = prefs.url + "?tecnico=" + Uri.encode(prefs.tecnico) + "&placa=" + Uri.encode(prefs.placa)
-            val r = Api.consultar(url, prefs.chave)
+            val r = Api.consultar(url, prefs.senha)
             hoje = r.optJSONObject("hoje")
             checklists = r.optJSONArray("checklists")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } } ?: emptyList()
             val vs = r.getJSONArray("veiculos")
@@ -361,7 +392,9 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
                 prefs.valorPadrao = c.optDouble("valorPadrao", prefs.valorPadrao)
             }
         } catch (e: Exception) {
-            erro = "Sem conexão com o sistema. Toque em Atualizar."
+            // Senha trocada ou apagada na planilha: volta para a tela de login.
+            if (e.message?.startsWith("Entre novamente") == true) aoTrocar()
+            else erro = "Sem conexão com o sistema. Toque em Atualizar."
         }
     }
 
@@ -628,7 +661,7 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
                 escopo.launch {
                     try {
                         val corpo = JSONObject()
-                            .put("chave", prefs.chave)
+                            .put("senha", prefs.senha)
                             .put("tecnico", prefs.tecnico).put("placa", prefs.placa)
                             .put("km", kmDigitado)
                             .put("origem", if (painel.kmLido == kmDigitado) "Digitado (confere com a foto)" else "Digitado")
