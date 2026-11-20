@@ -27,7 +27,7 @@ const CHECKLISTS = ['Segurança do veículo', 'Ferramental e EPI'];
 const TZ = 'America/Sao_Paulo';
 /* Colunas da aba Veículos (base 0). */
 const V = { PLACA: 0, MODELO: 1, ANO: 2, COR: 3, KM_COUBE: 4, KM_ULT_ABAST: 5, KM_ATUAL: 6, KM_RODADOS: 7,
-            KM_RESTANTES: 8, LITROS_REST: 9, SITUACAO: 10, OLEO_KM: 11, OLEO_DATA: 12, SEGURO: 13, MANUTENCAO: 14 };
+            KM_RESTANTES: 8, LITROS_REST: 9, SITUACAO: 10, OLEO_KM: 11, OLEO_DATA: 12, SEGURO: 13, MANUTENCAO: 14, OLEO_AGENDADA: 15 };
 const PASTA_FOTOS = 'Fotos Abastecimento GCM';
 
 /**
@@ -74,7 +74,9 @@ function parametros_() {
 function manutencaoPrevista_(r, cfg) {
   const kmAtual = Number(r[V.KM_ATUAL]) || 0;
   const oleoKm = Number(r[V.OLEO_KM]) || 0;
-  const oleo = { kmUltimaTroca: oleoKm || null, dataUltimaTroca: dataBr_(r[V.OLEO_DATA]), intervalo: cfg.oleoIntervalo };
+  const oleo = { kmUltimaTroca: oleoKm || null, dataUltimaTroca: dataBr_(r[V.OLEO_DATA]), intervalo: cfg.oleoIntervalo,
+                 agendadaPara: dataBr_(r[V.OLEO_AGENDADA]),
+                 agendadaIso: r[V.OLEO_AGENDADA] instanceof Date ? Utilities.formatDate(r[V.OLEO_AGENDADA], TZ, 'yyyy-MM-dd') : '' };
   if (oleoKm > 0) {
     oleo.proximaTrocaKm = oleoKm + cfg.oleoIntervalo;
     oleo.kmFaltando = oleo.proximaTrocaKm - kmAtual;
@@ -153,6 +155,23 @@ function doPost(e) {
       return json_({ ok: true, problemas: problemas.length, checklists: situacaoChecklists_(d.tecnico, agora) });
     }
 
+    if (d.tipo === 'agendar_oleo') {
+      const m = String(d.data || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!m) return json_({ ok: false, erro: 'Data inválida' });
+      const data = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+      const linha = linhaVeiculo_(d.placa);
+      if (!linha) return json_({ ok: false, erro: 'Veículo não encontrado' });
+      ss.getSheetByName(ABA.VEICULOS).getRange(linha, V.OLEO_AGENDADA + 1).setValue(data);
+      SpreadsheetApp.flush();
+      if (cfg.email) {
+        MailApp.sendEmail(cfg.email, `Troca de óleo agendada: ${d.placa} em ${dataBr_(data)}`,
+          `Prezado Glaydson,\n\nO técnico ${d.tecnico} agendou a troca de óleo do veículo ${d.placa} para ${dataBr_(data)}.\n\n` +
+          `Atenciosamente,\nControle de Abastecimento GCM Serviços`);
+      }
+      const r = linhas_(ss.getSheetByName(ABA.VEICULOS)).find(l => l[V.PLACA] === d.placa);
+      return json_({ ok: true, veiculo: veiculoJson_(r, cfg) });
+    }
+
     const km = Number(d.km);
     if (!(km > 0)) return json_({ ok: false, erro: 'Informe o km' });
 
@@ -163,6 +182,7 @@ function doPost(e) {
         const aba = ss.getSheetByName(ABA.VEICULOS);
         aba.getRange(linha, V.OLEO_KM + 1).setValue(km);
         aba.getRange(linha, V.OLEO_DATA + 1).setValue(agora);
+        aba.getRange(linha, V.OLEO_AGENDADA + 1).setValue('');
       }
       SpreadsheetApp.flush();
       return json_({ ok: true, relatorio: relatorio_(d.tecnico, d.placa, agora) });
@@ -588,7 +608,7 @@ if(!D.frota.length)h+='<tr><td colspan="8" class="vazio">Nenhum veículo cadastr
 D.frota.forEach(f=>{
  const ch=f.ultimaChecagem;
  const est=f.emManutencao?selo('Em manutenção','ruim'):selo('Funcionando','ok');
- const oleo=f.oleo.situacao==='Sem registro'?selo('Sem registro','neutro'):selo(f.oleo.situacao,cls[f.oleo.situacao])+'<div class="sub">Próxima: '+N(f.oleo.proximaTrocaKm)+' km ('+(f.oleo.kmFaltando<0?'passou '+N(-f.oleo.kmFaltando):'faltam '+N(f.oleo.kmFaltando))+' km)</div>';
+ const oleo=f.oleo.situacao==='Sem registro'?selo('Sem registro','neutro'):selo(f.oleo.situacao,cls[f.oleo.situacao])+'<div class="sub">Próxima: '+N(f.oleo.proximaTrocaKm)+' km ('+(f.oleo.kmFaltando<0?'passou '+N(-f.oleo.kmFaltando):'faltam '+N(f.oleo.kmFaltando))+' km)</div>'+(f.oleo.agendadaPara?'<div class="sub"><b>Agendada para '+E(f.oleo.agendadaPara)+'</b></div>':'');
  const seg=f.seguro.situacao==='Sem registro'?selo('Sem registro','neutro'):selo(f.seguro.situacao,cls[f.seguro.situacao])+'<div class="sub">Vence '+E(f.seguro.vencimento)+(f.seguro.diasRestantes>=0?' ('+f.seguro.diasRestantes+' dias)':'')+'</div>';
  h+='<tr><td><b>'+E(f.placa)+'</b><div class="sub">'+E([f.modelo,f.cor,f.ano].filter(Boolean).join(' · '))+'</div></td>'+
  '<td>'+(E(f.tecnicos)||'<span class="sub">—</span>')+'</td><td>'+N(f.kmAtual)+' km</td>'+

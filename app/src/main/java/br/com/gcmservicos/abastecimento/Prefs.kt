@@ -33,4 +33,27 @@ class Prefs(context: Context) {
 
     val configurado: Boolean
         get() = url.isNotBlank() && chave.isNotBlank() && tecnico.isNotBlank() && placa.isNotBlank()
+
+    // Situação da troca de óleo guardada no aparelho, usada no alerta das 8h.
+    var oleoSituacao: String
+        get() = sp.getString("oleoSituacao", "") ?: ""
+        set(v) = sp.edit().putString("oleoSituacao", v).apply()
+    var oleoKmFaltando: Long
+        get() = sp.getLong("oleoKmFaltando", 0)
+        set(v) = sp.edit().putLong("oleoKmFaltando", v).apply()
+    var oleoAgendada: String
+        get() = sp.getString("oleoAgendada", "") ?: ""
+        set(v) = sp.edit().putString("oleoAgendada", v).apply()
+    var oleoAgendadaBr: String
+        get() = sp.getString("oleoAgendadaBr", "") ?: ""
+        set(v) = sp.edit().putString("oleoAgendadaBr", v).apply()
+
+    /** Guarda a situação da troca de óleo do veículo (objeto "oleo" devolvido pelo sistema). */
+    fun salvarOleo(oleo: org.json.JSONObject?) {
+        if (oleo == null) return
+        oleoSituacao = oleo.optString("situacao")
+        oleoKmFaltando = oleo.optLong("kmFaltando")
+        oleoAgendada = oleo.optString("agendadaIso")
+        oleoAgendadaBr = oleo.optString("agendadaPara")
+    }
 }

@@ -1,5 +1,6 @@
 package br.com.gcmservicos.abastecimento
 
+import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -153,19 +154,152 @@ internal fun CartaoChecagem(prefs: Prefs, hoje: JSONObject, aoEnviar: () -> Unit
     }
 }
 
-/** Avisos de troca de óleo e seguro obrigatório na tela inicial. */
+/** Aviso do seguro obrigatório na tela inicial. */
 @Composable
 internal fun AvisosPrevistos(veiculo: JSONObject) {
-    veiculo.optJSONObject("oleo")?.let { o ->
-        when (o.optString("situacao")) {
-            "Atrasada" -> Aviso("Troca de óleo atrasada: passou ${km(-o.optDouble("kmFaltando"))} do previsto.", Cores.VERMELHO_CLARO, Cores.VERMELHO, Icons.Filled.Warning)
-            "Trocar em breve" -> Aviso("Troca de óleo em breve: faltam ${km(o.optDouble("kmFaltando"))}.", Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning)
-        }
-    }
     veiculo.optJSONObject("seguro")?.let { s ->
         when (s.optString("situacao")) {
             "Vencido" -> Aviso("Seguro obrigatório vencido em ${s.optString("vencimento")}.", Cores.VERMELHO_CLARO, Cores.VERMELHO, Icons.Filled.Warning)
             "Vence em breve" -> Aviso("Seguro obrigatório vence em ${s.optString("vencimento")} (${s.optInt("diasRestantes")} dias).", Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning)
+        }
+    }
+}
+
+/**
+ * Troca de óleo na tela inicial: quando estiver perto (ou atrasada), o técnico agenda a data.
+ * No dia anterior e no dia agendado o celular avisa às 8h.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun CartaoOleo(prefs: Prefs, oleo: JSONObject, aoAtualizar: (JSONObject) -> Unit) {
+    val situacao = oleo.optString("situacao")
+    val agendada = oleo.optString("agendadaPara")
+    val precisa = situacao == "Trocar em breve" || situacao == "Atrasada"
+    if (!precisa && agendada.isBlank()) return
+
+    val escopo = rememberCoroutineScope()
+    var escolhendo by remember { mutableStateOf(false) }
+    var ocupado by remember { mutableStateOf(false) }
+    var erro by remember { mutableStateOf<String?>(null) }
+    val faltam = oleo.optDouble("kmFaltando", 0.0)
+    val atrasada = situacao == "Atrasada"
+    val cor = if (atrasada && agendada.isBlank()) Cores.VERMELHO else Cores.LARANJA
+
+    Card(shape = CANTO, colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        modifier = Modifier.fillMaxWidth().border(2.dp, cor, CANTO)) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Filled.Build, contentDescription = null, tint = cor)
+                Text("Troca de óleo", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+            if (precisa) {
+                Text(
+                    if (atrasada) "Atrasada: passou ${km(-faltam)} do previsto." else "Faltam ${km(faltam)} para a troca.",
+                    color = cor, fontWeight = FontWeight.SemiBold
+                )
+            }
+            if (agendada.isNotBlank()) {
+                Text("Agendada para $agendada", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = Cores.AZUL)
+                Text("O celular avisa às 8h do dia anterior e do dia da troca.", color = Cores.SUAVE, fontSize = 13.sp)
+                OutlinedButton(onClick = { escolhendo = true }, enabled = !ocupado, shape = CANTO_CAMPO, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.DateRange, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Mudar a data")
+                }
+            } else {
+                BotaoMarca(
+                    if (ocupado) "Enviando..." else "Agendar troca de óleo", { escolhendo = true },
+                    habilitado = !ocupado, altura = 56.dp,
+                    icone = { Icon(Icons.Filled.DateRange, contentDescription = null, tint = Color.White) }
+                )
+            }
+            erro?.let { Erro(it) }
+        }
+    }
+
+    if (escolhendo) {
+        val hoje = remember {
+            java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
+                set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+            }.timeInMillis
+        }
+        val estado = rememberDatePickerState(
+            initialSelectedDateMillis = hoje + 86_400_000L,
+            selectableDates = object : SelectableDates {
+                override fun isSelectableDate(utcTimeMillis: Long) = utcTimeMillis >= hoje
+            }
+        )
+        DatePickerDialog(
+            onDismissRequest = { escolhendo = false },
+            confirmButton = {
+                TextButton(enabled = estado.selectedDateMillis != null, onClick = {
+                    val millis = estado.selectedDateMillis ?: return@TextButton
+                    escolhendo = false
+                    val iso = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                        .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.format(millis)
+                    ocupado = true; erro = null
+                    escopo.launch {
+                        try {
+                            val r = Api.enviar(
+                                prefs.url, JSONObject().put("chave", prefs.chave).put("tipo", "agendar_oleo")
+                                    .put("tecnico", prefs.tecnico).put("placa", prefs.placa).put("data", iso)
+                            )
+                            r.optJSONObject("veiculo")?.let { v ->
+                                prefs.salvarOleo(v.optJSONObject("oleo"))
+                                aoAtualizar(v)
+                            }
+                        } catch (e: Exception) {
+                            erro = "Não foi possível agendar. Verifique a internet e tente de novo."
+                        } finally { ocupado = false }
+                    }
+                }) { Text("Agendar") }
+            },
+            dismissButton = { TextButton(onClick = { escolhendo = false }) { Text("Cancelar") } }
+        ) {
+            DatePicker(state = estado, title = { Text("Data da troca de óleo", modifier = Modifier.padding(start = 24.dp, top = 16.dp)) })
+        }
+    }
+}
+
+/**
+ * Pede, uma única vez, o que o Android precisa para o alerta das 8h tocar com a tela bloqueada:
+ * notificações ativadas e o app fora da economia de bateria.
+ */
+@Composable
+internal fun CartaoAlertas() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    var verificar by remember { mutableIntStateOf(0) }
+    val ciclo = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(ciclo) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) verificar++
+        }
+        ciclo.lifecycle.addObserver(obs)
+        onDispose { ciclo.lifecycle.removeObserver(obs) }
+    }
+    val notificacoes = remember(verificar) { androidx.core.app.NotificationManagerCompat.from(ctx).areNotificationsEnabled() }
+    val bateria = remember(verificar) {
+        ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
+    }
+    if (notificacoes && bateria) return
+
+    Card(shape = CANTO, colors = CardDefaults.cardColors(containerColor = Cores.AZUL.copy(alpha = 0.08f)), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Ative os alertas do celular", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Cores.AZUL)
+            Text("Para o alerta das 8h tocar mesmo com o celular bloqueado, toque no botão e escolha Permitir.", color = Cores.TEXTO)
+            BotaoMarca("Ativar alertas", {
+                val intent = if (!notificacoes) {
+                    Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                } else {
+                    Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
+                }
+                try { ctx.startActivity(intent) } catch (e: Exception) {
+                    ctx.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName)))
+                }
+            }, altura = 52.dp)
         }
     }
 }
@@ -436,7 +570,7 @@ internal fun TelaRelatorio(prefs: Prefs) {
                                     prefs.url, JSONObject().put("chave", prefs.chave).put("tipo", "troca_oleo")
                                         .put("tecnico", prefs.tecnico).put("placa", prefs.placa).put("km", kmOleo.toLong())
                                 )
-                                resp.optJSONObject("relatorio")?.let { rel = it }
+                                resp.optJSONObject("relatorio")?.let { rel = it; prefs.salvarOleo(it.optJSONObject("oleo")) }
                                 registrandoOleo = false
                                 aviso = "Troca de óleo registrada."
                             } catch (e: Exception) {
