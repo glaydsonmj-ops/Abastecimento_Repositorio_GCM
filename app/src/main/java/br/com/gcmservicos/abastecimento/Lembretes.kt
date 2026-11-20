@@ -62,11 +62,11 @@ object Lembretes {
             context, if (periodo == INICIO) 11 else 12, abrir,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val texto = if (periodo == INICIO) "Bom dia! Tire a foto do km do painel para começar o dia."
+        val texto = if (periodo == INICIO) "Bom dia! O veículo está funcionando corretamente? Responda no app e tire a foto do km para começar o dia."
         else "Fim do expediente: tire a foto do km final do painel."
         val n = NotificationCompat.Builder(context, CANAL)
             .setSmallIcon(R.drawable.ic_notificacao)
-            .setContentTitle("Foto do km: ${periodo.lowercase()}")
+            .setContentTitle(if (periodo == INICIO) "Bom dia! Checagem do veículo" else "Foto do km: fim do dia")
             .setContentText(texto)
             .setStyle(NotificationCompat.BigTextStyle().bigText(texto))
             .setPriority(NotificationCompat.PRIORITY_HIGH)

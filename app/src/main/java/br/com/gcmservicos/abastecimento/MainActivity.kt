@@ -61,9 +61,9 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 
-private val BR = Locale("pt", "BR")
-private val CANTO = RoundedCornerShape(20.dp)
-private val CANTO_CAMPO = RoundedCornerShape(14.dp)
+internal val BR = Locale("pt", "BR")
+internal val CANTO = RoundedCornerShape(20.dp)
+internal val CANTO_CAMPO = RoundedCornerShape(14.dp)
 
 class MainActivity : ComponentActivity() {
     private val pedido = mutableStateOf<String?>(null)
@@ -98,6 +98,9 @@ private sealed interface Tela {
     data object Escolher : Tela
     data object Inicio : Tela
     data class Registro(val etapa: Etapa) : Tela
+    data object Checklists : Tela
+    data object Relatorio : Tela
+    data class Checklist(val nome: String, val itens: List<String>) : Tela
 }
 
 /** Foto já processada: imagem com data e hora gravadas, nitidez e km lido. */
@@ -120,12 +123,13 @@ private fun App(pedido: MutableState<String?>) {
     LaunchedEffect(pedido.value) {
         val p = pedido.value
         if (p != null && prefs.configurado) {
-            tela = Tela.Registro(if (p == Lembretes.FIM) Etapa.FIM else Etapa.INICIO)
+            // Às 8h a tela inicial pergunta primeiro se o veículo está funcionando.
+            tela = if (p == Lembretes.FIM) Tela.Registro(Etapa.FIM) else Tela.Inicio
         }
         pedido.value = null
     }
-    val podeVoltar = tela is Tela.Registro || (tela is Tela.Escolher && prefs.configurado)
-    BackHandler(enabled = podeVoltar) { tela = Tela.Inicio }
+    val podeVoltar = tela !is Tela.Inicio && (tela !is Tela.Escolher || prefs.configurado)
+    BackHandler(enabled = podeVoltar) { tela = if (tela is Tela.Checklist) Tela.Checklists else Tela.Inicio }
 
     val hojeTexto = SimpleDateFormat("dd/MM/yyyy", BR).format(Date())
     Column(Modifier.fillMaxSize()) {
@@ -133,14 +137,26 @@ private fun App(pedido: MutableState<String?>) {
             Tela.Escolher -> Cabecalho("Abastecimento GCM", "Identificação do técnico", if (podeVoltar) ({ tela = Tela.Inicio }) else null)
             Tela.Inicio -> Cabecalho("Olá, ${prefs.tecnico.substringBefore(' ')}", "Veículo ${prefs.placa} · $hojeTexto", null)
             is Tela.Registro -> Cabecalho(t.etapa.titulo, "Etapa ${t.etapa.numero} de 3 · $hojeTexto") { tela = Tela.Inicio }
+            Tela.Checklists -> Cabecalho("Check-lists", "Segurança do veículo, ferramental e EPI", null)
+            Tela.Relatorio -> Cabecalho("Relatório", "Veículo ${prefs.placa}", null)
+            is Tela.Checklist -> Cabecalho(t.nome, "Check-list semanal · $hojeTexto") { tela = Tela.Checklists }
         }
         FaixaMarca()
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (val t = tela) {
                 Tela.Escolher -> TelaEscolher(prefs) { Lembretes.agendar(ctx); tela = Tela.Inicio }
-                Tela.Inicio -> TelaInicio(prefs, aviso, { aviso = null; tela = Tela.Registro(it) }, { tela = Tela.Escolher })
+                Tela.Inicio -> TelaInicio(prefs, aviso, { aviso = null; tela = Tela.Registro(it) }, { tela = Tela.Escolher }, { aviso = null; tela = Tela.Checklists })
                 is Tela.Registro -> TelaRegistro(prefs, t.etapa) { msg -> aviso = msg; tela = Tela.Inicio }
+                Tela.Checklists -> TelaChecklists(prefs, aviso) { nome, itens -> aviso = null; tela = Tela.Checklist(nome, itens) }
+                Tela.Relatorio -> TelaRelatorio(prefs)
+                is Tela.Checklist -> TelaChecklist(prefs, t.nome, t.itens) { msg -> aviso = msg; tela = Tela.Checklists }
             }
+        }
+        if (tela == Tela.Inicio || tela == Tela.Checklists || tela == Tela.Relatorio) {
+            BarraNavegacao(
+                atual = when (tela) { Tela.Checklists -> 1; Tela.Relatorio -> 2; else -> 0 },
+                aoEscolher = { i -> aviso = null; tela = when (i) { 1 -> Tela.Checklists; 2 -> Tela.Relatorio; else -> Tela.Inicio } }
+            )
         }
     }
 }
@@ -171,21 +187,21 @@ private fun Cabecalho(titulo: String, subtitulo: String, aoVoltar: (() -> Unit)?
     }
 }
 
-private fun Modifier.tela() = this.fillMaxSize().padding(horizontal = 16.dp, vertical = 18.dp)
+internal fun Modifier.tela() = this.fillMaxSize().padding(horizontal = 16.dp, vertical = 18.dp)
 
-private fun km(v: Any?): String {
+internal fun km(v: Any?): String {
     val n = (v as? Number)?.toDouble() ?: v?.toString()?.toDoubleOrNull() ?: return "-"
     return NumberFormat.getIntegerInstance(BR).format(n) + " km"
 }
 
-private fun reais(v: Double): String = NumberFormat.getCurrencyInstance(BR).format(v)
+internal fun reais(v: Double): String = NumberFormat.getCurrencyInstance(BR).format(v)
 
-private fun dec(v: Double, casas: Int = 2): String =
+internal fun dec(v: Double, casas: Int = 2): String =
     NumberFormat.getNumberInstance(BR).apply { minimumFractionDigits = casas; maximumFractionDigits = casas }.format(v)
 
 /** Cartão branco padrão. */
 @Composable
-private fun Cartao(modifier: Modifier = Modifier, conteudo: @Composable ColumnScope.() -> Unit) {
+internal fun Cartao(modifier: Modifier = Modifier, conteudo: @Composable ColumnScope.() -> Unit) {
     Card(
         modifier.fillMaxWidth(), shape = CANTO,
         colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -197,7 +213,7 @@ private fun Cartao(modifier: Modifier = Modifier, conteudo: @Composable ColumnSc
 
 /** Faixa de aviso colorida (sucesso, alerta ou erro). */
 @Composable
-private fun Aviso(texto: String, fundo: Color, cor: Color, icone: ImageVector) {
+internal fun Aviso(texto: String, fundo: Color, cor: Color, icone: ImageVector) {
     Row(
         Modifier.fillMaxWidth().background(fundo, CANTO_CAMPO).padding(14.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -208,10 +224,10 @@ private fun Aviso(texto: String, fundo: Color, cor: Color, icone: ImageVector) {
 }
 
 @Composable
-private fun Erro(texto: String) = Aviso(texto, Cores.VERMELHO_CLARO, Cores.VERMELHO, Icons.Filled.Warning)
+internal fun Erro(texto: String) = Aviso(texto, Cores.VERMELHO_CLARO, Cores.VERMELHO, Icons.Filled.Warning)
 
 @Composable
-private fun Campo(valor: String, aoMudar: (String) -> Unit, rotulo: String, teclado: KeyboardType) {
+internal fun Campo(valor: String, aoMudar: (String) -> Unit, rotulo: String, teclado: KeyboardType) {
     OutlinedTextField(
         valor, aoMudar, label = { Text(rotulo) }, singleLine = true, shape = CANTO_CAMPO,
         keyboardOptions = KeyboardOptions(keyboardType = teclado),
@@ -323,8 +339,9 @@ private fun CartaoOpcao(texto: String, icone: ImageVector?, selecionado: Boolean
 // ---------------------------------------------------------------- Tela principal
 
 @Composable
-private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, aoTrocar: () -> Unit) {
+private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, aoTrocar: () -> Unit, aoChecklists: () -> Unit) {
     var hoje by remember { mutableStateOf<JSONObject?>(null) }
+    var checklists by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var veiculo by remember { mutableStateOf<JSONObject?>(null) }
     var erro by remember { mutableStateOf<String?>(null) }
     var atualizar by remember { mutableIntStateOf(0) }
@@ -335,6 +352,7 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
             val url = prefs.url + "?tecnico=" + Uri.encode(prefs.tecnico) + "&placa=" + Uri.encode(prefs.placa)
             val r = Api.consultar(url, prefs.chave)
             hoje = r.optJSONObject("hoje")
+            checklists = r.optJSONArray("checklists")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } } ?: emptyList()
             val vs = r.getJSONArray("veiculos")
             veiculo = (0 until vs.length()).map { vs.getJSONObject(it) }.firstOrNull { it.optString("placa") == prefs.placa }
             r.optJSONObject("config")?.let { c ->
@@ -348,6 +366,9 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
 
     Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         aviso?.let { Aviso(it, Cores.VERDE_CLARO, Cores.VERDE, Icons.Filled.CheckCircle) }
+
+        // Checagem diária: o veículo está funcionando?
+        hoje?.let { h -> CartaoChecagem(prefs, h) { atualizar++ } }
 
         // Resumo do dia: sempre visível
         Cartao {
@@ -377,6 +398,20 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
                 "Abastecer" -> Aviso("Abasteça o veículo: restam ${km(v.opt("kmRestantes"))}.", Cores.VERMELHO_CLARO, Cores.VERMELHO, Icons.Filled.Warning)
                 "OK" -> Aviso("Tanque: restam cerca de ${km(v.opt("kmRestantes"))}.", Cores.VERDE_CLARO, Cores.VERDE, Icons.Filled.CheckCircle)
             }
+            AvisosPrevistos(v)
+        }
+        val pendentes = checklists.filter { !it.optBoolean("feitoNaSemana") }
+        if (pendentes.isNotEmpty()) {
+            Card(onClick = aoChecklists, shape = CANTO_CAMPO, colors = CardDefaults.cardColors(containerColor = Cores.LARANJA_CLARO)) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Icon(Icons.Filled.Warning, contentDescription = null, tint = Cores.LARANJA)
+                    Text(
+                        "Check-list da semana pendente: " + pendentes.joinToString(" e ") { it.optString("nome") } + ".",
+                        color = Cores.TEXTO, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f)
+                    )
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Cores.SUAVE)
+                }
+            }
         }
 
         Text("Etapas do dia", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
@@ -400,7 +435,7 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
 private fun rememberVectorPainterIcon(v: ImageVector) = androidx.compose.ui.graphics.vector.rememberVectorPainter(v)
 
 @Composable
-private fun Indicador(rotulo: String, valor: String, cor: Color, modifier: Modifier) {
+internal fun Indicador(rotulo: String, valor: String, cor: Color, modifier: Modifier) {
     Column(
         modifier.background(cor.copy(alpha = 0.08f), CANTO_CAMPO).padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
