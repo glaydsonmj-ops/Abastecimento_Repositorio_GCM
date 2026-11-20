@@ -67,7 +67,7 @@ function consultarDados_(p) {
                    lembreteInicio: cfg.lembreteInicio, lembreteFim: cfg.lembreteFim };
   const tecnico = t.nome;
   const placa = t.placa;
-  const resposta = { ok: true, veiculos, tecnicos, config };
+  const resposta = { ok: true, placa: t.placa, veiculos, tecnicos, config };
   if (tecnico && placa) {
     resposta.hoje = resumoDia_(tecnico, placa, new Date());
     resposta.checklists = situacaoChecklists_(tecnico, new Date());
@@ -164,9 +164,36 @@ function registrar_(d) {
     d.tecnico = t.nome;
     d.placa = t.placa;
     const ss = SpreadsheetApp.getActive();
-    const agora = new Date();
+    const agora = dataDoRegistro_(d.quando);
     const cfg = parametros_();
+    // Registro guardado sem internet e reenviado: se já chegou antes, não grava de novo.
+    const cache = CacheService.getScriptCache();
+    const idReg = d.id ? 'reg_' + String(d.id).slice(0, 80) : '';
+    if (idReg && cache.get(idReg)) return { ok: true, duplicado: true, hoje: resumoDia_(d.tecnico, d.placa, new Date()) };
+    const resp = registrarTipo_(d, t, ss, agora, cfg);
+    if (idReg && resp && resp.ok) cache.put(idReg, '1', 21600);
+    try { relatorioMensalSeDevido_(); } catch (err) { console.error(err); }
+    return resp;
+  } catch (err) {
+    return { ok: false, erro: String(err) };
+  } finally {
+    lock.releaseLock();
+  }
+}
 
+/**
+ * Data e hora do registro. O aplicativo manda "quando" (hora do celular) nos registros
+ * guardados sem internet; vale se for dos últimos 7 dias e não estiver no futuro.
+ */
+function dataDoRegistro_(quando) {
+  const agora = new Date();
+  const n = Number(quando);
+  if (n > 0 && n <= agora.getTime() + 5 * 60000 && n >= agora.getTime() - 7 * 86400000) return new Date(Math.min(n, agora.getTime()));
+  return agora;
+}
+
+function registrarTipo_(d, t, ss, agora, cfg) {
+  {
     if (d.tipo === 'checagem') {
       const funcionando = d.funcionando === true || d.funcionando === 'true';
       ss.getSheetByName(ABA.CHECAGEM).appendRow([agora, d.tecnico, d.placa, funcionando ? 'Sim' : 'Não', d.descricao || '']);
@@ -228,6 +255,10 @@ function registrar_(d) {
       return { ok: true, relatorio: relatorio_(d.tecnico, d.placa, agora) };
     }
 
+    // Confere o km com os registros anteriores antes de gravar (alerta por e-mail ao responsável).
+    let avisoKm = '';
+    try { avisoKm = conferirKm_(d, km, agora, cfg); } catch (err) { console.error(err); }
+
     const foto = d.fotoBase64 ? salvarFoto_(d.fotoBase64, d.placa, agora) : '';
     if (d.tipo === 'abastecimento') {
       const litros = Number(d.litros) || '';
@@ -246,13 +277,58 @@ function registrar_(d) {
       alertaEnviado = enviarAlerta_(status, d.tecnico, agora);
     }
     try { avisosPrevistos_(d.placa, d.tecnico, agora, cfg); } catch (err) { console.error(err); }
-    const hoje = resumoDia_(d.tecnico, d.placa, agora);
-    return { ok: true, situacao: status, alertaEnviado, kmDoDia: hoje.kmRodados, hoje };
-  } catch (err) {
-    return { ok: false, erro: String(err) };
-  } finally {
-    lock.releaseLock();
+    const hoje = resumoDia_(d.tecnico, d.placa, new Date());
+    return { ok: true, situacao: status, alertaEnviado, kmDoDia: hoje.kmRodados, hoje, avisoKm };
   }
+}
+
+/**
+ * Km incoerente ou consumo fora do normal: avisa o responsável por e-mail e registra em Alertas.
+ * - km menor que o último km registrado do veículo;
+ * - no abastecimento, consumo desde o abastecimento anterior muito diferente do esperado
+ *   (km rodados / litros do abastecimento anterior, fora de 60% a 150% do consumo da planilha).
+ * Devolve um aviso curto para o técnico (ou '').
+ */
+function conferirKm_(d, km, agora, cfg) {
+  const ss = SpreadsheetApp.getActive();
+  const ts = r => new Date(r[0]).getTime();
+  const antes = r => r[0] && r[2] === d.placa && ts(r) <= agora.getTime(); // conferido antes de gravar o registro atual
+  const abast = linhas_(ss.getSheetByName(ABA.ABASTECIMENTOS)).filter(antes);
+  const todos = abast.concat(linhas_(ss.getSheetByName(ABA.LEITURAS)).filter(antes))
+    .filter(r => Number(r[3]) > 0).sort((a, b) => ts(a) - ts(b));
+  const ultimo = todos[todos.length - 1];
+  const problemas = [];
+  let aviso = '';
+  if (ultimo && km < Number(ultimo[3])) {
+    problemas.push({ tipo: 'Km incoerente', texto:
+      `O km informado (${km}) é menor que o último registro do veículo (${Number(ultimo[3])} km em ` +
+      `${Utilities.formatDate(new Date(ultimo[0]), TZ, 'dd/MM/yyyy HH:mm')}, por ${ultimo[1]}).` });
+    aviso = `O km informado é menor que o último registro (${Number(ultimo[3])} km). O responsável foi avisado.`;
+  }
+  if (d.tipo === 'abastecimento' && abast.length) {
+    const ant = abast.sort((a, b) => ts(a) - ts(b))[abast.length - 1];
+    const litrosAnt = Number(ant[5]) || 0;
+    const rodados = km - (Number(ant[3]) || 0);
+    if (litrosAnt > 0 && rodados > 0) {
+      const consumo = rodados / litrosAnt;
+      if (consumo < cfg.consumo * 0.6 || consumo > cfg.consumo * 1.5) {
+        problemas.push({ tipo: 'Consumo fora do normal', texto:
+          `Desde o abastecimento anterior (${Utilities.formatDate(new Date(ant[0]), TZ, 'dd/MM/yyyy')}, ${litrosAnt} litros) ` +
+          `o veículo rodou ${rodados} km, ou seja, cerca de ${arred_(consumo)} km/l. O esperado é cerca de ${cfg.consumo} km/l.` });
+      }
+    }
+  }
+  if (!problemas.length) return aviso;
+  const abaA = ss.getSheetByName(ABA.ALERTAS);
+  problemas.forEach(p => abaA.appendRow([agora, d.placa, d.tecnico, km, cfg.email || '', p.tipo]));
+  if (cfg.email) {
+    MailApp.sendEmail(cfg.email, `${problemas.map(p => p.tipo).join(' e ')}: ${d.tecnico} (${d.placa})`,
+      `Prezado Glaydson,\n\nO registro de ${d.tipo === 'abastecimento' ? 'abastecimento' : (d.periodo || 'km')} do técnico ` +
+      `${d.tecnico} (veículo ${d.placa}) em ${Utilities.formatDate(agora, TZ, 'dd/MM/yyyy HH:mm')} merece conferência:\n\n` +
+      problemas.map(p => '- ' + p.texto).join('\n') +
+      `\n\nAs fotos do painel e da nota ficam na planilha.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+  }
+  return aviso;
 }
 
 /** Número da linha (base 1) do veículo na aba Veículos, ou 0. */
@@ -525,13 +601,7 @@ function cadastro_(d) {
     const placas = nV >= 2 ? abaV.getRange(2, 1, nV - 1, 1).getValues().map(r => String(r[0]).trim()) : [];
     const existe = placas.some(p => p.toUpperCase().replace(/[^A-Z0-9]/g, '') === placa);
     const placaFinal = existe ? placas.find(p => p.toUpperCase().replace(/[^A-Z0-9]/g, '') === placa) : placa;
-    if (!existe) {
-      // Primeira linha vazia na coluna A (as colunas E:K são calculadas pelas fórmulas da linha 2).
-      let i = placas.findIndex(p => !p);
-      if (i < 0) i = placas.length;
-      abaV.getRange(i + 2, 1, 1, 4).setValues([[placa, String(d.modelo || '').trim(), String(d.ano || '').trim(), String(d.cor || '').trim()]]);
-      abaV.getRange(i + 2, V.MANUTENCAO + 1).setValue('Não');
-    }
+    if (!existe) criarVeiculo_(placa, d.modelo, d.ano, d.cor);
 
     const nT = abaTec.getLastRow();
     const nomesT = nT >= 2 ? abaTec.getRange(2, 1, nT - 1, 1).getValues().map(r => String(r[0]).trim()) : [];
@@ -736,6 +806,169 @@ function excluirTecnico(chave, nome) {
   }
 }
 
+// ------------------------------------------------------------------ Relatório mensal por e-mail
+
+/** Mês anterior ao de "data", como yyyy-MM. */
+function mesAnterior_(data) {
+  const [a, m] = Utilities.formatDate(data, TZ, 'yyyy-MM').split('-').map(Number);
+  return m === 1 ? (a - 1) + '-12' : a + '-' + String(m - 1).padStart(2, '0');
+}
+
+/**
+ * Envia o relatório do mês anterior uma única vez, no primeiro registro feito a partir do dia 1º.
+ * Não precisa de gatilho: usa a propriedade RELATORIO_MENSAL para lembrar o último mês enviado.
+ */
+function relatorioMensalSeDevido_() {
+  const props = PropertiesService.getScriptProperties();
+  const alvo = mesAnterior_(new Date());
+  const ultimo = props.getProperty('RELATORIO_MENSAL');
+  if (ultimo === alvo) return false;
+  props.setProperty('RELATORIO_MENSAL', alvo);
+  if (!ultimo) return false; // primeira vez: só marca, o primeiro relatório sai no próximo dia 1º
+  return enviarRelatorioMes_(alvo);
+}
+
+/** Botão da gestão de frota: envia agora o relatório do mês anterior. */
+function enviarRelatorioMensal(chave) {
+  const cfg = parametros_();
+  if (!cfg.chaveFrota || chave !== cfg.chaveFrota) throw new Error('Chave da gestão de frota inválida.');
+  if (!cfg.email) throw new Error('Cadastre o e-mail do responsável na aba Configurações.');
+  const mes = mesAnterior_(new Date());
+  enviarRelatorioMes_(mes);
+  return { ok: true, mes, email: cfg.email };
+}
+
+/** Dados do mês (yyyy-MM) por técnico: gastos, km, dias trabalhados, check-lists e alertas. */
+function dadosMes_(mes) {
+  const ss = SpreadsheetApp.getActive();
+  const cfg = parametros_();
+  const dia = x => Utilities.formatDate(new Date(x), TZ, 'yyyy-MM-dd');
+  const noMes = r => r[0] && dia(r[0]).slice(0, 7) === mes;
+  const abast = linhas_(ss.getSheetByName(ABA.ABASTECIMENTOS)).filter(noMes);
+  const leit = linhas_(ss.getSheetByName(ABA.LEITURAS)).filter(noMes);
+  const chk = linhas_(ss.getSheetByName(ABA.CHECKLISTS)).filter(noMes);
+  const alertas = linhas_(ss.getSheetByName(ABA.ALERTAS)).filter(noMes);
+  const ativos = linhas_(ss.getSheetByName(ABA.TECNICOS)).filter(r => r[0] && String(r[3]).toLowerCase() !== 'não');
+  const veiculos = linhas_(ss.getSheetByName(ABA.VEICULOS)).filter(r => r[V.PLACA]);
+  const nomes = [];
+  ativos.map(r => String(r[0])).concat(abast.map(r => String(r[1])), leit.map(r => String(r[1])))
+    .forEach(n => { if (n && !nomes.includes(n)) nomes.push(n); });
+  // Semanas do mês: as que começam (segunda-feira) dentro do mês.
+  const [a, m] = mes.split('-').map(Number);
+  const semanas = [];
+  for (let d = 1; d <= new Date(a, m, 0).getDate(); d++) {
+    const s = inicioSemana_(new Date(a, m - 1, d, 12));
+    if (s.slice(0, 7) === mes && !semanas.includes(s)) semanas.push(s);
+  }
+  const tecnicos = nomes.map(nome => {
+    const ab = abast.filter(r => r[1] === nome);
+    const le = leit.filter(r => r[1] === nome);
+    const placas = [...new Set(ab.concat(le).map(r => r[2]))];
+    const km = placas.reduce((t, p) => {
+      const kms = ab.concat(le).filter(r => r[2] === p).map(r => Number(r[3])).filter(n => n > 0);
+      return t + (kms.length ? Math.max(...kms) - Math.min(...kms) : 0);
+    }, 0);
+    const cad = ativos.find(r => r[0] === nome);
+    const chkFeitos = CHECKLISTS.map(c => new Set(chk.filter(r => r[1] === nome && r[3] === c).map(r => inicioSemana_(new Date(r[0]))).filter(s => semanas.includes(s))).size);
+    return {
+      nome, placa: cad ? String(cad[2] || '') : placas.join(', '), ativo: !!cad,
+      abastecimentos: ab.length,
+      gasto: arred_(ab.reduce((t, r) => t + (Number(r[4]) || 0), 0)),
+      litros: arred_(ab.reduce((t, r) => t + (Number(r[5]) || 0), 0)),
+      km, dias: new Set(le.filter(r => r[4] === 'Início do dia').map(r => dia(r[0]))).size,
+      checklists: CHECKLISTS.map((c, i) => ({ nome: c, feitas: chkFeitos[i], semanas: semanas.length })),
+      alertas: alertas.filter(r => r[2] === nome && ['Km incoerente', 'Consumo fora do normal', 'Manutenção', 'Check-list'].includes(r[5])).map(r => r[5]),
+    };
+  });
+  const pendencias = [];
+  veiculos.forEach(r => {
+    const mp = manutencaoPrevista_(r, cfg);
+    if (String(r[V.MANUTENCAO]).toLowerCase() === 'sim') pendencias.push(`${r[V.PLACA]}: em manutenção`);
+    if (['Trocar em breve', 'Atrasada'].includes(mp.oleo.situacao)) pendencias.push(`${r[V.PLACA]}: troca de óleo ${mp.oleo.situacao.toLowerCase()}`);
+    if (['Vence em breve', 'Vencido'].includes(mp.seguro.situacao)) pendencias.push(`${r[V.PLACA]}: seguro obrigatório ${mp.seguro.situacao.toLowerCase()} (${mp.seguro.vencimento})`);
+  });
+  ativos.filter(r => !r[2] || !veiculos.some(v => v[V.PLACA] === r[2])).forEach(r => pendencias.push(`${r[0]}: sem veículo atribuído`));
+  return { mes, tecnicos, pendencias,
+    total: { gasto: arred_(tecnicos.reduce((t, x) => t + x.gasto, 0)), litros: arred_(tecnicos.reduce((t, x) => t + x.litros, 0)),
+             km: tecnicos.reduce((t, x) => t + x.km, 0), abastecimentos: abast.length } };
+}
+
+function enviarRelatorioMes_(mes) {
+  const cfg = parametros_();
+  if (!cfg.email) return false;
+  const D = dadosMes_(mes);
+  const [a, m] = mes.split('-');
+  const nomeMes = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'][Number(m) - 1] + ' de ' + a;
+  const R = n => 'R$ ' + Number(n || 0).toFixed(2).replace('.', ',');
+  const N = n => Number(n || 0).toLocaleString('pt-BR');
+  const E = x => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const td = 'style="padding:6px 8px;border-bottom:1px solid #E3E7EE"';
+  const linhas = D.tecnicos.map(t => `<tr><td ${td}><b>${E(t.nome)}</b>${t.ativo ? '' : ' (excluído)'}<br><span style="color:#6B7588">${E(t.placa)}</span></td>` +
+    `<td ${td}>${R(t.gasto)}</td><td ${td}>${N(t.litros)} L</td><td ${td}>${N(t.km)} km</td><td ${td}>${t.km > 0 && t.gasto > 0 ? R(t.gasto / t.km) : '—'}</td>` +
+    `<td ${td}>${t.dias}</td><td ${td}>${t.checklists.map(c => E(c.nome) + ': ' + c.feitas + '/' + c.semanas).join('<br>')}</td>` +
+    `<td ${td}>${t.alertas.length ? E(t.alertas.join(', ')) : '—'}</td></tr>`).join('');
+  const html = `<div style="font-family:Arial,sans-serif;color:#14213D"><p>Prezado Glaydson,</p>` +
+    `<p>Segue o resumo de ${nomeMes} do controle de combustível.</p>` +
+    `<p><b>Total:</b> ${R(D.total.gasto)} em ${D.total.abastecimentos} abastecimento(s), ${N(D.total.litros)} litros e ${N(D.total.km)} km rodados.</p>` +
+    `<table style="border-collapse:collapse;font-size:13px"><tr style="background:#052545;color:#fff">` +
+    ['Técnico', 'Gasto', 'Litros', 'Km', 'Custo/km', 'Dias', 'Check-lists (semanas)', 'Alertas'].map(h => `<th style="padding:6px 8px;text-align:left">${h}</th>`).join('') +
+    `</tr>${linhas || `<tr><td ${td} colspan="8">Nenhum registro no mês.</td></tr>`}</table>` +
+    `<p><b>Pendências agora:</b></p>${D.pendencias.length ? '<ul>' + D.pendencias.map(p => `<li>${E(p)}</li>`).join('') + '</ul>' : '<p>Nenhuma pendência.</p>'}` +
+    `<p>Atenciosamente,<br>Controle de Abastecimento GCM Serviços</p></div>`;
+  MailApp.sendEmail({ to: cfg.email, subject: `Relatório mensal de combustível: ${nomeMes}`, htmlBody: html,
+    body: `Prezado Glaydson,\n\nResumo de ${nomeMes}: ${R(D.total.gasto)}, ${N(D.total.litros)} litros, ${N(D.total.km)} km.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços` });
+  SpreadsheetApp.getActive().getSheetByName(ABA.ALERTAS).appendRow([new Date(), '', '', mes, cfg.email, 'Relatório mensal']);
+  return true;
+}
+
+// ------------------------------------------------------------------ Veículo do técnico (gestão de frota)
+
+/** Cria o veículo na primeira linha vazia da aba Veículos (E:K são calculadas pelas fórmulas da linha 2). */
+function criarVeiculo_(placa, modelo, ano, cor) {
+  const abaV = SpreadsheetApp.getActive().getSheetByName(ABA.VEICULOS);
+  const nV = abaV.getLastRow();
+  const placas = nV >= 2 ? abaV.getRange(2, 1, nV - 1, 1).getValues().map(r => String(r[0]).trim()) : [];
+  let i = placas.findIndex(p => !p);
+  if (i < 0) i = placas.length;
+  abaV.getRange(i + 2, 1, 1, 4).setValues([[placa, String(modelo || '').trim(), String(ano || '').trim(), String(cor || '').trim()]]);
+  abaV.getRange(i + 2, V.MANUTENCAO + 1).setValue('Não');
+}
+
+function normalizarPlaca_(p) { return String(p || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+
+/**
+ * Atribui (ou troca) o veículo de um técnico pela gestão de frota.
+ * Se a placa ainda não existir, cria o veículo com modelo, ano e cor.
+ */
+function atribuirVeiculo(chave, nome, placa, modelo, ano, cor) {
+  const cfg = parametros_();
+  if (!cfg.chaveFrota || chave !== cfg.chaveFrota) throw new Error('Chave da gestão de frota inválida.');
+  nome = String(nome || '').trim();
+  const alvo = normalizarPlaca_(placa);
+  if (!nome) throw new Error('Informe o técnico.');
+  if (!alvo) throw new Error('Escolha o veículo.');
+  const trava = LockService.getScriptLock();
+  trava.waitLock(20000);
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const abaT = ss.getSheetByName(ABA.TECNICOS);
+    const n = abaT.getLastRow() - 1;
+    const nomes = n >= 1 ? abaT.getRange(2, 1, n, 1).getValues().map(r => String(r[0]).trim()) : [];
+    const i = nomes.indexOf(nome);
+    if (i < 0) throw new Error('Técnico não encontrado.');
+    const existente = linhas_(ss.getSheetByName(ABA.VEICULOS)).map(r => String(r[V.PLACA]).trim()).find(p => p && normalizarPlaca_(p) === alvo);
+    if (!existente && (alvo.length < 6 || alvo.length > 8)) throw new Error('Digite a placa do veículo (ex.: ABC1D23).');
+    const placaFinal = existente || alvo;
+    if (!existente) criarVeiculo_(alvo, modelo, ano, cor);
+    abaT.getRange(i + 2, 3).setValue(placaFinal);
+    ss.getSheetByName(ABA.ALERTAS).appendRow([new Date(), placaFinal, nome, '', '', existente ? 'Veículo atribuído' : 'Veículo cadastrado e atribuído']);
+    SpreadsheetApp.flush();
+    return { ok: true, nome, placa: placaFinal, novo: !existente };
+  } finally {
+    trava.releaseLock();
+  }
+}
+
 function dadosFrota_(cfg) {
   const ss = SpreadsheetApp.getActive();
   const agora = new Date();
@@ -853,6 +1086,10 @@ button.excluir{background:#fff;color:var(--vermelho);border:1.5px solid var(--ve
 button.excluir:hover{background:var(--vermelho-c)}button.excluir:disabled{opacity:.6;cursor:wait}
 button.excluir-tec{margin-top:6px;background:#fff;color:var(--vermelho);border:1.5px solid var(--vermelho);padding:4px 10px;font-size:12px;border-radius:10px}
 button.excluir-tec:hover{background:var(--vermelho-c)}button.excluir-tec:disabled{opacity:.6;cursor:wait}
+select.sel-veic,.novo-veic input{padding:7px 9px;border:1.5px solid var(--linha);border-radius:10px;font-size:14px;font-family:inherit;margin:2px 0;min-width:150px}
+.novo-veic{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}.novo-veic[hidden]{display:none}.novo-veic input{width:110px;min-width:0}
+button.salvar-veic,button.relatorio{background:var(--azul);color:#fff;border:0;padding:7px 14px;font-size:13px;border-radius:10px;cursor:pointer}
+button.salvar-veic:disabled,button.relatorio:disabled{opacity:.7;cursor:wait}
 .login button{width:100%;background:linear-gradient(90deg,var(--magenta),var(--laranja));color:#fff;padding:14px}.erro{color:var(--vermelho)}
 `;
 
@@ -889,10 +1126,18 @@ D.frota.forEach(f=>{
  '<td><button class="excluir" data-placa="'+E(f.placa)+'" data-tecnicos="'+E(f.tecnicos)+'">Excluir</button></td></tr>';
 });
 h+='</table></div></section>';
+const placasF=D.frota.map(f=>f.placa);
+h+='<section class="cartao"><h2>Técnicos e veículos</h2><div class="tabela"><table><tr><th>Técnico</th><th>Veículo</th><th></th><th></th></tr>'+
+ (D.porTecnico.length?D.porTecnico.map((t,i)=>{const tem=placasF.includes(t.placa);
+  return '<tr data-i="'+i+'"><td><b>'+E(t.nome)+'</b>'+(tem?'':'<div>'+selo('Sem veículo','ruim')+'</div>')+'</td><td><select class="sel-veic">'+
+  (tem?'':'<option value="">Escolha…</option>')+placasF.map(p=>'<option'+(p===t.placa?' selected':'')+'>'+E(p)+'</option>').join('')+'<option value="__novo">+ Cadastrar outro veículo</option></select>'+
+  '<div class="novo-veic" hidden><input class="nv-placa" placeholder="Placa"><input class="nv-modelo" placeholder="Modelo"><input class="nv-ano" placeholder="Ano"><input class="nv-cor" placeholder="Cor"></div></td>'+
+  '<td><button class="salvar-veic" data-nome="'+E(t.nome)+'">Salvar</button></td><td><button class="excluir-tec" data-nome="'+E(t.nome)+'">Excluir login</button></td></tr>';}).join(''):'<tr><td colspan="4" class="vazio">Nenhum técnico.</td></tr>')+
+ '</table></div><p class="sub">Para trocar o veículo de um técnico, escolha a placa e toque em Salvar. O técnico passa a usar o novo veículo na próxima vez que abrir o aplicativo.</p></section>';
 const mx=Math.max(1,...D.dias.map(d=>d.gasto));
 h+='<div class="duas"><section class="cartao"><h2>Gasto com combustível nos últimos 30 dias</h2><div class="barras">'+
  D.dias.map((d,i)=>'<div class="barra" title="'+E(d.dia)+': '+R(d.gasto)+'"><i style="height:'+(d.gasto/mx*100)+'%"></i><span>'+(i%5===4?E(d.dia):'&nbsp;')+'</span></div>').join('')+'</div></section>';
-h+='<section class="cartao"><h2>Por técnico no mês</h2><div class="lista">'+(D.porTecnico.length?D.porTecnico.map(t=>'<div class="item"><div><b>'+E(t.nome)+'</b><div class="sub">'+E(t.placa)+' · '+t.abastecimentos+' abastecimento(s)</div></div><div style="text-align:right"><b>'+R(t.gastoMes)+'</b><div class="sub">'+N(t.kmMes)+' km</div><button class="excluir-tec" data-nome="'+E(t.nome)+'">Excluir login</button></div></div>').join(''):'<p class="vazio">Nenhum técnico.</p>')+'</div></section></div>';
+h+='<section class="cartao"><h2>Por técnico no mês</h2><div class="lista">'+(D.porTecnico.length?D.porTecnico.map(t=>'<div class="item"><div><b>'+E(t.nome)+'</b><div class="sub">'+E(t.placa)+' · '+t.abastecimentos+' abastecimento(s)</div></div><div style="text-align:right"><b>'+R(t.gastoMes)+'</b><div class="sub">'+N(t.kmMes)+' km</div></div></div>').join(''):'<p class="vazio">Nenhum técnico.</p>')+'</div></section></div>';
 h+='<div class="duas"><section class="cartao"><h2>Últimos abastecimentos</h2><div class="tabela"><table><tr><th>Data</th><th>Técnico</th><th>Placa</th><th>Valor</th><th>Litros</th><th>Km</th><th>Nota</th></tr>'+
  (D.abastecimentos.length?D.abastecimentos.map(a=>'<tr><td>'+E(a.data)+'</td><td>'+E(a.tecnico)+'</td><td>'+E(a.placa)+'</td><td>'+R(a.valor)+'</td><td>'+N(a.litros)+'</td><td>'+N(a.km)+'</td><td>'+(a.nota?'<a href="'+E(a.nota)+'" target="_blank">Ver</a>':'')+'</td></tr>').join(''):'<tr><td colspan="7" class="vazio">Nenhum abastecimento registrado.</td></tr>')+'</table></div></section>';
 h+='<section class="cartao"><h2>Ocorrências e alertas</h2><div class="lista">'+
@@ -903,6 +1148,7 @@ h+='<section class="cartao"><h2>Check-lists da semana</h2><div class="tabela"><t
  (D.checklists.length?D.checklists.map(t=>'<tr><td><b>'+E(t.nome)+'</b><div class="sub">'+E(t.placa)+'</div></td>'+t.lista.map(c=>'<td>'+(c.feitoNaSemana?selo('Feito','ok'):selo('Pendente','atencao'))+
  (c.ultimoEm?'<div class="sub">Último: '+E(c.ultimoEm)+'</div>':'')+
  (c.problemas.length?'<div class="sub" style="color:var(--vermelho)">'+c.problemas.map(p=>E(p.item)+': '+E(p.condicao)+(p.observacao?' ('+E(p.observacao)+')':'')).join('<br>')+'</div>':'')+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="3" class="vazio">Nenhum técnico.</td></tr>')+'</table></div></section>';
+h+='<section class="cartao"><h2>Relatório mensal</h2><p class="sub">Todo dia 1º o resumo do mês anterior (gastos, km, check-lists e pendências por técnico) é enviado automaticamente para o seu e-mail.</p><button class="relatorio">Enviar agora o relatório do mês anterior</button></section>';
 h+='<p class="sub" style="text-align:center">Para cadastrar troca de óleo, vencimento do seguro ou retirar a manutenção, use a aba Veículos da planilha. Os itens dos check-lists ficam na aba Itens dos check-lists.</p></main>';
 document.getElementById('app').innerHTML=h;
 document.querySelectorAll('button.excluir').forEach(b=>b.addEventListener('click',()=>{
@@ -923,6 +1169,21 @@ document.querySelectorAll('button.excluir-tec').forEach(b=>b.addEventListener('c
   .withFailureHandler(e=>{b.disabled=false;b.textContent='Excluir login';alert('Não foi possível excluir: '+(e&&e.message||e));})
   .excluirTecnico(CHAVE,nome);
 }));
+document.querySelectorAll('select.sel-veic').forEach(s=>s.addEventListener('change',()=>{s.parentNode.querySelector('.novo-veic').hidden=s.value!=='__novo';}));
+document.querySelectorAll('button.salvar-veic').forEach(b=>b.addEventListener('click',()=>{
+ const tr=b.closest('tr'),s=tr.querySelector('select.sel-veic'),q=c=>tr.querySelector(c).value.trim();
+ const novo=s.value==='__novo',placa=novo?q('.nv-placa'):s.value;
+ if(!placa){alert('Escolha o veículo.');return;}
+ b.disabled=true;b.textContent='Salvando…';
+ google.script.run.withSuccessHandler(()=>{window.top.location.href=URL_FROTA;})
+  .withFailureHandler(e=>{b.disabled=false;b.textContent='Salvar';alert('Não foi possível salvar: '+(e&&e.message||e));})
+  .atribuirVeiculo(CHAVE,b.dataset.nome,placa,novo?q('.nv-modelo'):'',novo?q('.nv-ano'):'',novo?q('.nv-cor'):'');
+}));
+const br=document.querySelector('button.relatorio');
+if(br)br.addEventListener('click',()=>{br.disabled=true;br.textContent='Enviando…';
+ google.script.run.withSuccessHandler(r=>{br.textContent='Relatório enviado para '+r.email;})
+  .withFailureHandler(e=>{br.disabled=false;br.textContent='Enviar agora o relatório do mês anterior';alert('Não foi possível enviar: '+(e&&e.message||e));})
+  .enviarRelatorioMensal(CHAVE);});
 `;
 
 // ------------------------------------------------------------------ Versão web do técnico (iPhone)
@@ -1023,7 +1284,7 @@ function appTecnico_() {
           falha(new Error(r.erro || 'Erro no sistema.')); return;
         }
         ok(r);
-      }).withFailureHandler(e => falha(new Error('Sem conexão com o sistema. Verifique a internet e tente de novo.')))[fn](arg);
+      }).withFailureHandler(e => { const x = new Error('Sem conexão com o sistema. Verifique a internet e tente de novo.'); x.semConexao = true; falha(x); })[fn](arg);
     });
   }
   function credenciais(extra) { return Object.assign({ tecnico: sessao.tecnico, senha: sessao.senha, placa: sessao.placa }, extra || {}); }
@@ -1142,10 +1403,13 @@ function appTecnico_() {
     try { guardado = JSON.parse(localStorage.getItem(chaveCache) || 'null'); } catch (e) { guardado = null; }
     const aplicar = r => {
       estado.r = r;
+      // O responsável pode trocar o veículo do técnico pela gestão de frota.
+      if (r.placa && r.placa !== sessao.placa) { sessao.placa = r.placa; gravar(sessao); }
       estado.veiculo = (r.veiculos || []).find(v => v.placa === sessao.placa) || null;
     };
     if (guardado && guardado.dia === hojeBr()) { aplicar(guardado.r); estado.atualizando = true; desenharInicio(); }
     chamar('webConsultar', credenciais()).then(r => {
+      if (r.placa && r.placa !== sessao.placa) { aplicar(r); return telaInicio(estado.msg); } // veículo trocado: redesenha o cabeçalho
       try { localStorage.setItem(chaveCache, JSON.stringify({ dia: hojeBr(), r })); } catch (e) { /* sem armazenamento */ }
       aplicar(r); estado.atualizando = false;
       desenharInicio();
@@ -1166,6 +1430,8 @@ function appTecnico_() {
     if (estado.atualizando) x += '<div class="carregando"></div><p class="sub" style="text-align:center;margin-top:-6px">Atualizando...</p>';
     if (estado.erroAtualizar) x += '<div class="aviso atencao">Não foi possível atualizar agora. Mostrando os últimos dados. Toque em Atualizar.</div>';
     if (estado.msg) x += '<div class="aviso ok">' + E(estado.msg).replace(/\n/g, '<br>') + '</div>';
+    const naFila = fila().length;
+    if (naFila) x += '<div class="aviso atencao">📶 ' + naFila + ' registro(s) guardado(s) neste celular, aguardando internet para enviar.</div>';
     if (h.emManutencao) {
       x += '<div class="cartao" style="background:var(--vermelho-c)"><h2 style="color:var(--vermelho)">🔧 Veículo em manutenção</h2>' +
         '<p class="sub">Quando o veículo voltar a funcionar, toque no botão abaixo.</p><button class="btn verde" data-acao="voltouFuncionar">O veículo voltou a funcionar</button></div>';
@@ -1304,7 +1570,7 @@ function appTecnico_() {
     if (abast && !s.fotos.nota) return desenharRegistro('Fotografe a nota fiscal.');
     if (!s.fotos.painel) return desenharRegistro('Fotografe o painel.');
     if (!(kmN > 0)) return desenharRegistro('Digite o km do painel.');
-    const corpo = credenciais({ km: kmN, origem: 'Digitado (versão web)' });
+    const corpo = credenciais({ km: kmN, origem: 'Digitado (versão web)', quando: Date.now(), id: 'w' + Date.now() + Math.random().toString(36).slice(2, 8) });
     if (abast) {
       const v = num(s.valor), l = num(s.litros);
       if (!(v > 0)) return desenharRegistro('Digite o valor colocado.');
@@ -1320,9 +1586,36 @@ function appTecnico_() {
       const partes = [['Início do turno registrado. Bom trabalho!', 'Abastecimento registrado.', 'Turno encerrado.'][s.etapa]];
       if (r.hoje && (s.etapa === 2 || r.hoje.kmRodados > 0)) partes.push('Hoje você rodou ' + km(r.hoje.kmRodados) + ' e gastou ' + reais(r.hoje.gasto) + ' de combustível.');
       if (r.situacao && r.situacao.situacao === 'Abastecer') partes.push('Atenção: o veículo precisa ser abastecido (restam ' + km(r.situacao.kmRestantes) + '). O responsável foi avisado.');
+      if (r.avisoKm) partes.push(r.avisoKm);
       telaInicio(partes.join('\n'));
-    }).catch(e => desenharRegistro('Não foi possível enviar: ' + e.message));
+    }).catch(e => {
+      // Sem internet: guarda o registro no celular e envia sozinho quando a conexão voltar.
+      if (e.semConexao && guardarNaFila(corpo)) return telaInicio('Sem internet agora. O registro foi guardado neste celular e será enviado automaticamente quando a internet voltar.');
+      desenharRegistro('Não foi possível enviar: ' + e.message);
+    });
   };
+
+  // ---------------------------------------------------------------- Registros guardados sem internet
+  function fila() { try { return JSON.parse(localStorage.getItem('gcm_fila') || '[]'); } catch (e) { return []; } }
+  function gravarFila(f) { try { localStorage.setItem('gcm_fila', JSON.stringify(f)); return true; } catch (e) { return false; } }
+  function guardarNaFila(corpo) { const f = fila(); f.push(corpo); return gravarFila(f); }
+  let enviandoFila = false;
+  function enviarFila() {
+    if (enviandoFila || !fila().length) return;
+    enviandoFila = true;
+    const proximo = () => {
+      const f = fila();
+      if (!f.length) { enviandoFila = false; if (estado && estado.r && document.getElementById('conteudo')) telaInicio('Os registros guardados sem internet foram enviados.'); return; }
+      chamar('webRegistrar', f[0]).then(() => { gravarFila(fila().slice(1)); proximo(); })
+        .catch(e => {
+          if (e.semConexao) { enviandoFila = false; return; }
+          gravarFila(fila().slice(1)); proximo(); // recusado pelo sistema: descarta para não travar a fila
+        });
+    };
+    proximo();
+  }
+  window.addEventListener('online', () => setTimeout(enviarFila, 2000));
+  setInterval(enviarFila, 60000);
 
   // ---------------------------------------------------------------- Check-lists
   ac.checklist = b => {
@@ -1358,5 +1651,5 @@ function appTecnico_() {
   // ---------------------------------------------------------------- Começo
   sessao = ler();
   if (sessao && sessao.tecnico && !dono()) gravarDono(sessao.tecnico);
-  if (sessao && sessao.tecnico && sessao.senha && sessao.placa) telaInicio(); else telaLogin();
+  if (sessao && sessao.tecnico && sessao.senha && sessao.placa) { telaInicio(); setTimeout(enviarFila, 3000); } else telaLogin();
 }
