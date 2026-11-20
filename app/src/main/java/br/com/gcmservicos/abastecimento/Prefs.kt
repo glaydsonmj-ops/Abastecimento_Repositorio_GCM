@@ -32,6 +32,11 @@ class Prefs(context: Context) {
         get() = sp.getString("lembreteFim", "17:00") ?: "17:00"
         set(v) = sp.edit().putString("lembreteFim", v).apply()
 
+    /** Última resposta do sistema para a tela inicial (mostrada enquanto atualiza). */
+    var ultimaConsulta: String
+        get() = sp.getString("ultimaConsulta", "") ?: ""
+        set(v) = sp.edit().putString("ultimaConsulta", v).apply()
+
     val configurado: Boolean
         get() = url.isNotBlank() && senha.isNotBlank() && tecnico.isNotBlank() && placa.isNotBlank()
 

@@ -51,6 +51,9 @@ function doGet(e) {
 
 /** Consulta usada pelo app Android (GET) e pela versão web (iPhone). */
 function consultar_(p) {
+  return comMemo_(() => consultarDados_(p));
+}
+function consultarDados_(p) {
   if (p.acao === 'tecnicos') return listaTecnicos_();
   if (!autorizado_(p)) return { ok: false, erro: ERRO_LOGIN };
   const ss = SpreadsheetApp.getActive();
@@ -74,6 +77,12 @@ function consultar_(p) {
 
 /** Parâmetros da aba Configurações. */
 function parametros_() {
+  if (MEMO_ && MEMO_.__cfg) return MEMO_.__cfg;
+  const cfg = lerParametros_();
+  if (MEMO_) MEMO_.__cfg = cfg;
+  return cfg;
+}
+function lerParametros_() {
   const v = config_().getRange('B2:B12').getValues().map(l => l[0]);
   const hora = x => x instanceof Date ? Utilities.formatDate(x, TZ, 'HH:mm') : String(x || '');
   return {
@@ -321,7 +330,7 @@ function resumoDia_(tecnico, placa, agora) {
   const abastHoje = abastecimentos.filter(r => r[1] === tecnico && doDia(r));
   const kms = leituras.map(r => Number(r[3])).concat(abastHoje.map(r => Number(r[3]))).filter(n => n > 0);
   const kmRodados = kms.length ? Math.max(...kms) - Math.min(...kms) : 0;
-  const consumo = Number(config_().getRange('B2').getValue()) || 10;
+  const consumo = parametros_().consumo;
   const ultimo = abastecimentos.filter(r => Number(r[4]) > 0 && Number(r[5]) > 0).pop();
   const precoLitro = ultimo ? Number(ultimo[4]) / Number(ultimo[5]) : 0;
   const litros = kmRodados / consumo;
@@ -381,9 +390,28 @@ function salvarFoto_(base64, placa, data) {
   return pasta.createFile(blob).getUrl();
 }
 
+/**
+ * Linhas de dados de uma aba (sem o cabeçalho), lidas de uma vez só.
+ * Durante uma consulta (MEMO_ ativo), cada aba é lida uma única vez e reaproveitada.
+ */
+let MEMO_ = null;
 function linhas_(aba) {
-  const n = aba.getLastRow();
-  return n < 2 ? [] : aba.getRange(2, 1, n - 1, aba.getLastColumn()).getValues();
+  const nome = aba.getName();
+  if (MEMO_ && MEMO_[nome]) return MEMO_[nome];
+  const v = aba.getDataRange().getValues();
+  // Ignora linhas totalmente vazias no fim (fórmulas da aba Veículos ocupam a coluna inteira).
+  let fim = v.length;
+  while (fim > 1 && v[fim - 1].every(c => c === '' || c === null)) fim--;
+  const linhas = fim < 2 ? [] : v.slice(1, fim);
+  if (MEMO_) MEMO_[nome] = linhas;
+  return linhas;
+}
+
+/** Executa uma leitura reaproveitando as abas já lidas. */
+function comMemo_(fn) {
+  const anterior = MEMO_;
+  MEMO_ = anterior || {};
+  try { return fn(); } finally { MEMO_ = anterior; }
 }
 
 /** A chave fica na aba Configurações (B8) ou na propriedade do script CHAVE_APP. */
@@ -635,7 +663,7 @@ function paginaFrota_(chave) {
       <input name="chave" type="password" placeholder="Chave" required><button>Entrar</button></form>
       ${chave ? '<p class="erro">Chave incorreta.</p>' : ''}</div>`;
   } else {
-    const dados = JSON.stringify(dadosFrota_(cfg)).replace(/</g, '\\u003c');
+    const dados = JSON.stringify(comMemo_(() => dadosFrota_(cfg))).replace(/</g, '\\u003c');
     corpo = `<div id="app"></div><script>const D=${dados};const URL_FROTA=${JSON.stringify(url + '?pagina=frota&chave=' + encodeURIComponent(chave))};const CHAVE=${JSON.stringify(chave).replace(/</g, '\\u003c')};</script><script>${JS_FROTA_}</script>`;
   }
   return HtmlService.createHtmlOutput(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Gestão de frota GCM</title><style>${CSS_FROTA_}</style></head><body>${corpo}</body></html>`)
@@ -1062,14 +1090,25 @@ function appTecnico_() {
   // ---------------------------------------------------------------- Início
   function telaInicio(msg) {
     estado = { msg: msg || '' };
-    tela('Olá, ' + sessao.tecnico.split(' ')[0], 'Veículo ' + sessao.placa + ' · ' + hojeBr(), '<div id="conteudo"><div class="carregando"></div></div>', false);
-    chamar('webConsultar', credenciais()).then(r => {
+    tela('Olá, ' + sessao.tecnico.split(' ')[0], 'Veículo ' + sessao.placa + ' · ' + hojeBr(), '<div id="conteudo"><div class="carregando"></div><p class="sub" style="text-align:center">Carregando seus dados...</p></div>', false);
+    // Mostra na hora os últimos dados guardados no aparelho e atualiza em seguida.
+    const chaveCache = 'gcm_ultimo_' + sessao.tecnico + '|' + sessao.placa;
+    let guardado = null;
+    try { guardado = JSON.parse(localStorage.getItem(chaveCache) || 'null'); } catch (e) { guardado = null; }
+    const aplicar = r => {
       estado.r = r;
       estado.veiculo = (r.veiculos || []).find(v => v.placa === sessao.placa) || null;
+    };
+    if (guardado && guardado.dia === hojeBr()) { aplicar(guardado.r); estado.atualizando = true; desenharInicio(); }
+    chamar('webConsultar', credenciais()).then(r => {
+      try { localStorage.setItem(chaveCache, JSON.stringify({ dia: hojeBr(), r })); } catch (e) { /* sem armazenamento */ }
+      aplicar(r); estado.atualizando = false;
       desenharInicio();
     }).catch(e => {
       const c = document.getElementById('conteudo');
-      if (c) c.innerHTML = '<div class="aviso erro">' + E(e.message) + '</div><button class="btn contorno" data-acao="atualizar">Tentar de novo</button>';
+      if (!c) return;
+      if (estado.r) { estado.atualizando = false; estado.erroAtualizar = e.message; desenharInicio(); return; }
+      c.innerHTML = '<div class="aviso erro">' + E(e.message) + '</div><button class="btn contorno" data-acao="atualizar">Tentar de novo</button>';
     });
   }
   ac.atualizar = () => telaInicio();
@@ -1079,6 +1118,8 @@ function appTecnico_() {
     const h = estado.r.hoje || {};
     const v = estado.veiculo;
     let x = '';
+    if (estado.atualizando) x += '<div class="carregando"></div><p class="sub" style="text-align:center;margin-top:-6px">Atualizando...</p>';
+    if (estado.erroAtualizar) x += '<div class="aviso atencao">Não foi possível atualizar agora. Mostrando os últimos dados. Toque em Atualizar.</div>';
     if (estado.msg) x += '<div class="aviso ok">' + E(estado.msg).replace(/\n/g, '<br>') + '</div>';
     if (h.emManutencao) {
       x += '<div class="cartao" style="background:var(--vermelho-c)"><h2 style="color:var(--vermelho)">🔧 Veículo em manutenção</h2>' +
