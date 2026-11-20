@@ -129,6 +129,11 @@ private fun App(pedido: MutableState<String?>) {
         }
         pedido.value = null
     }
+    // Atualização automática: ao abrir, confere se há versão nova e oferece atualizar com um toque.
+    var versaoNova by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(Unit) { versaoNova = Atualizador.versaoNova() }
+    versaoNova?.let { v -> DialogoAtualizacao(v) { versaoNova = null } }
+
     val podeVoltar = tela !is Tela.Inicio && (tela !is Tela.Escolher || prefs.configurado)
     BackHandler(enabled = podeVoltar) { tela = if (tela is Tela.Checklist) Tela.Checklists else Tela.Inicio }
 
@@ -242,52 +247,45 @@ internal fun Campo(valor: String, aoMudar: (String) -> Unit, rotulo: String, tec
 @Composable
 private fun TelaEscolher(prefs: Prefs, aoConcluir: () -> Unit) {
     val escopo = rememberCoroutineScope()
-    var carregando by remember { mutableStateOf(true) }
+    var carregando by remember { mutableStateOf(false) }
     var erro by remember { mutableStateOf<String?>(null) }
-    var tecnicos by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
-    var escolhido by remember { mutableStateOf<JSONObject?>(null) }
     var senha by remember { mutableStateOf("") }
     var senha2 by remember { mutableStateOf("") }
     var placas by remember { mutableStateOf<List<String>>(emptyList()) }
     var placa by remember { mutableStateOf("") }
-    var logado by remember { mutableStateOf(false) }
-    var tentativa by remember { mutableIntStateOf(0) }
-    var cadastrando by remember { mutableStateOf(false) }
+    var nomeLogado by remember { mutableStateOf("") }
+    // Celular sem dono ainda: abre direto o cadastro. Depois, só pede a senha do dono.
+    var cadastrando by remember { mutableStateOf(prefs.tecnico.isBlank()) }
+    var nomeDigitado by remember { mutableStateOf(prefs.tecnico) }
+    var outroNome by remember { mutableStateOf(prefs.tecnico.isBlank()) }
     var cad by remember { mutableStateOf(mapOf<String, String>()) }
-
-    LaunchedEffect(tentativa) {
-        carregando = true; erro = null
-        try {
-            val r = Api.consultar(prefs.url + "?acao=tecnicos", "")
-            val ts = r.getJSONArray("tecnicos")
-            tecnicos = (0 until ts.length()).map { ts.getJSONObject(it) }
-            escolhido = tecnicos.firstOrNull { it.optString("nome") == prefs.tecnico }
-            if (tecnicos.isEmpty()) erro = "Ainda não há técnicos cadastrados. Toque em \"Primeiro acesso\" abaixo."
-        } catch (e: Exception) {
-            erro = "Sem conexão com o sistema. Verifique a internet e tente de novo."
-        } finally {
-            carregando = false
-        }
-    }
 
     fun concluir(nome: String, p: String) {
         prefs.tecnico = nome; prefs.senha = senha; prefs.placa = p
         aoConcluir()
     }
+    fun salvarConfig(r: JSONObject) {
+        r.optJSONObject("config")?.let { c ->
+            prefs.consumoKmL = c.optDouble("consumoKmL", 10.0)
+            prefs.valorPadrao = c.optDouble("valorPadrao", 180.0)
+            prefs.lembreteInicio = c.optString("lembreteInicio", "08:00")
+            prefs.lembreteFim = c.optString("lembreteFim", "17:00")
+        }
+    }
 
     Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         LogoGcm(Modifier.fillMaxWidth().height(130.dp))
-        if (logado) {
+        if (nomeLogado.isNotBlank()) {
             // Técnico sem veículo definido na planilha: escolhe o veículo uma vez.
             Text("Qual veículo você usa?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             placas.forEach { p -> CartaoOpcao(p, null, placa == p) { placa = p } }
-            BotaoMarca("Continuar", { concluir(escolhido?.optString("nome") ?: "", placa) }, habilitado = placa.isNotBlank())
+            BotaoMarca("Continuar", { concluir(nomeLogado, placa) }, habilitado = placa.isNotBlank())
             return@Column
         }
         if (cadastrando) {
             // Primeiro acesso: o técnico cadastra o próprio nome, o veículo e a senha.
-            Text("Primeiro acesso", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text("Preencha uma única vez. Depois, é só entrar com o nome e a senha.", color = Cores.SUAVE)
+            Text("Bem-vindo! Faça seu cadastro", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("Preencha uma única vez. Depois, o aplicativo só pede a sua senha.", color = Cores.SUAVE)
             Cartao {
                 Text("Seus dados", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 CAMPOS_CADASTRO.forEach { (chave, rotulo, teclado) ->
@@ -317,12 +315,7 @@ private fun TelaEscolher(prefs: Prefs, aoConcluir: () -> Unit) {
                             val corpo = JSONObject().put("tipo", "cadastro").put("senha", senha)
                             CAMPOS_CADASTRO.forEach { (chave, _, _) -> corpo.put(chave, (cad[chave] ?: "").trim()) }
                             val r = Api.enviar(prefs.url, corpo)
-                            r.optJSONObject("config")?.let { c ->
-                                prefs.consumoKmL = c.optDouble("consumoKmL", 10.0)
-                                prefs.valorPadrao = c.optDouble("valorPadrao", 180.0)
-                                prefs.lembreteInicio = c.optString("lembreteInicio", "08:00")
-                                prefs.lembreteFim = c.optString("lembreteFim", "17:00")
-                            }
+                            salvarConfig(r)
                             concluir(r.optString("tecnico", nome), r.optString("placa"))
                         } catch (e: Exception) {
                             erro = e.message ?: "Sem conexão com o sistema."
@@ -333,69 +326,108 @@ private fun TelaEscolher(prefs: Prefs, aoConcluir: () -> Unit) {
                 },
                 habilitado = !carregando && senha.length == 4 && senha2.length == 4
             )
-            TextButton(onClick = { cadastrando = false; erro = null; senha = ""; senha2 = "" }) { Text("Voltar", color = Cores.SUAVE) }
+            TextButton(onClick = { cadastrando = false; erro = null; senha = ""; senha2 = "" }, modifier = Modifier.fillMaxWidth()) {
+                Text("Já tenho cadastro? Entrar", color = Cores.AZUL, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
             return@Column
         }
-        Text("Quem é você?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        if (carregando) LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = Cores.MAGENTA)
-        if (tecnicos.isEmpty() && erro != null) {
-            Erro(erro!!)
-            OutlinedButton(onClick = { tentativa++ }, shape = CANTO_CAMPO) { Text("Tentar de novo") }
-        }
-        tecnicos.forEach { t ->
-            val nome = t.optString("nome")
-            CartaoOpcao(nome, Icons.Filled.Person, escolhido?.optString("nome") == nome) {
-                escolhido = t; senha = ""; senha2 = ""; erro = null
-            }
-        }
-        val t = escolhido
-        if (t != null) {
-            val primeiro = !t.optBoolean("temSenha")
-            Cartao {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Filled.Lock, contentDescription = null, tint = Cores.MAGENTA)
-                    Text(if (primeiro) "Crie sua senha" else "Sua senha", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                }
-                if (primeiro) Text("Primeiro acesso: escolha 4 números. Ela será pedida só ao entrar.", color = Cores.SUAVE)
-                CampoSenha(senha, { senha = it }, if (primeiro) "Nova senha (4 números)" else "Senha (4 números)")
-                if (primeiro) CampoSenha(senha2, { senha2 = it }, "Repita a senha")
-                if (tecnicos.isNotEmpty()) erro?.let { Erro(it) }
-                BotaoMarca(
-                    if (carregando) "Entrando..." else "Entrar",
-                    {
-                        if (primeiro && senha != senha2) { erro = "As senhas não são iguais."; return@BotaoMarca }
-                        carregando = true; erro = null
-                        escopo.launch {
-                            try {
-                                val r = Api.enviar(prefs.url, JSONObject().put("tipo", "login").put("tecnico", t.optString("nome")).put("senha", senha))
-                                r.optJSONObject("config")?.let { c ->
-                                    prefs.consumoKmL = c.optDouble("consumoKmL", 10.0)
-                                    prefs.valorPadrao = c.optDouble("valorPadrao", 180.0)
-                                    prefs.lembreteInicio = c.optString("lembreteInicio", "08:00")
-                                    prefs.lembreteFim = c.optString("lembreteFim", "17:00")
-                                }
-                                val nome = r.optString("tecnico", t.optString("nome"))
-                                val ps = r.optJSONArray("placas")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
-                                val definida = r.optString("placa").ifBlank { if (ps.size == 1) ps.first() else "" }
-                                if (definida.isNotBlank()) concluir(nome, definida)
-                                else if (ps.isEmpty()) erro = "Nenhum veículo cadastrado. Fale com o responsável."
-                                else { placas = ps; placa = prefs.placa.takeIf { it in ps } ?: ""; logado = true }
-                            } catch (e: Exception) {
-                                erro = e.message ?: "Sem conexão com o sistema."
-                            } finally {
-                                carregando = false
-                            }
-                        }
-                    },
-                    habilitado = !carregando && senha.length == 4 && (!primeiro || senha2.length == 4)
+
+        // Entrar: o dono do celular só digita a senha.
+        Cartao {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Filled.Lock, contentDescription = null, tint = Cores.MAGENTA)
+                Text(
+                    if (outroNome) "Entrar" else "Olá, ${prefs.tecnico.substringBefore(' ').lowercase().replaceFirstChar { it.uppercase() }}!",
+                    fontSize = 20.sp, fontWeight = FontWeight.Bold
                 )
             }
+            if (outroNome) Campo(nomeDigitado, { nomeDigitado = it }, "Seu nome e sobrenome", KeyboardType.Text)
+            else Text("Digite sua senha para entrar.", color = Cores.SUAVE)
+            CampoSenha(senha, { senha = it }, "Senha (4 números)")
+            erro?.let { Erro(it) }
+            BotaoMarca(
+                if (carregando) "Entrando..." else "Entrar",
+                {
+                    val nomeTec = nomeDigitado.trim()
+                    carregando = true; erro = null
+                    escopo.launch {
+                        try {
+                            val r = Api.enviar(prefs.url, JSONObject().put("tipo", "login").put("tecnico", nomeTec).put("senha", senha))
+                            salvarConfig(r)
+                            val nome = r.optString("tecnico", nomeTec)
+                            val ps = r.optJSONArray("placas")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
+                            val definida = r.optString("placa").ifBlank { if (ps.size == 1) ps.first() else "" }
+                            if (definida.isNotBlank()) concluir(nome, definida)
+                            else if (ps.isEmpty()) erro = "Nenhum veículo cadastrado. Fale com o responsável."
+                            else { placas = ps; placa = prefs.placa.takeIf { it in ps } ?: ""; nomeLogado = nome }
+                        } catch (e: Exception) {
+                            erro = e.message ?: "Sem conexão com o sistema."
+                        } finally {
+                            carregando = false
+                        }
+                    }
+                },
+                habilitado = !carregando && senha.length == 4 && nomeDigitado.trim().contains(' ')
+            )
         }
-        OutlinedButton(
-            onClick = { cadastrando = true; escolhido = null; senha = ""; senha2 = ""; erro = null },
-            shape = CANTO_CAMPO, modifier = Modifier.fillMaxWidth().height(56.dp)
-        ) { Text("Primeiro acesso? Fazer meu cadastro", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+        if (!outroNome) {
+            TextButton(onClick = { outroNome = true; nomeDigitado = ""; senha = ""; erro = null }, modifier = Modifier.fillMaxWidth()) {
+                Text("Não é você? Entrar com outro nome", color = Cores.SUAVE)
+            }
+        }
+        TextButton(onClick = { cadastrando = true; senha = ""; senha2 = ""; erro = null }, modifier = Modifier.fillMaxWidth()) {
+            Text("Primeiro acesso? Fazer meu cadastro", color = Cores.AZUL, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
     }
+}
+
+/** Aviso de versão nova: baixa e abre o instalador do Android, sem desinstalar nem perder os dados. */
+@Composable
+private fun DialogoAtualizacao(versao: Int, aoFechar: () -> Unit) {
+    val ctx = LocalContext.current
+    val escopo = rememberCoroutineScope()
+    var baixando by remember { mutableStateOf(false) }
+    var progresso by remember { mutableIntStateOf(0) }
+    var erro by remember { mutableStateOf<String?>(null) }
+    var pediuPermissao by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = { if (!baixando) aoFechar() },
+        title = { Text("Nova versão disponível", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("A versão 1.0.$versao do aplicativo está pronta. Seus dados e sua senha continuam no celular.")
+                if (pediuPermissao && !Atualizador.podeInstalar(ctx))
+                    Text("Na tela que abriu, ative \"Permitir desta fonte\", volte e toque em Atualizar de novo. Isso só é pedido uma vez.", color = Cores.SUAVE)
+                if (baixando) {
+                    LinearProgressIndicator(progress = { progresso / 100f }, modifier = Modifier.fillMaxWidth())
+                    Text("Baixando... $progresso%", color = Cores.SUAVE)
+                }
+                erro?.let { Text(it, color = Cores.VERMELHO) }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !baixando, onClick = {
+                erro = null
+                if (!Atualizador.podeInstalar(ctx)) {
+                    pediuPermissao = true
+                    Atualizador.abrirPermissao(ctx)
+                    return@TextButton
+                }
+                baixando = true
+                escopo.launch {
+                    try {
+                        val arquivo = Atualizador.baixar(ctx, versao) { progresso = it }
+                        Atualizador.instalar(ctx, arquivo)
+                    } catch (e: Exception) {
+                        erro = e.message ?: "Sem conexão. Tente de novo."
+                    } finally {
+                        baixando = false
+                    }
+                }
+            }) { Text("Atualizar", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(enabled = !baixando, onClick = aoFechar) { Text("Depois") } }
+    )
 }
 
 private val CAMPOS_CADASTRO = listOf(
