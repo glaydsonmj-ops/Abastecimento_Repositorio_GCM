@@ -19,7 +19,7 @@ Aplicativo Android para o controle de abastecimento dos veículos da GCM Serviç
 
 1. Abra a planilha e vá em **Extensões > Apps Script**.
 2. Apague o conteúdo do editor, cole o arquivo `apps-script/Codigo.gs` e salve.
-3. Em **Configurações do projeto** (ícone de engrenagem) > **Propriedades do script**, adicione `CHAVE_APP` com uma senha de sua escolha.
+3. Defina a chave de acesso do app na aba **Configurações** da planilha (célula B8). Opcionalmente, ela pode ficar na propriedade do script `CHAVE_APP`, que tem prioridade.
 4. Clique em **Implantar > Nova implantação**, tipo **App da Web**. Executar como: **Eu**. Quem pode acessar: **Qualquer pessoa**.
 5. Autorize o acesso quando o Google pedir e copie a **URL do app da Web**.
 
@@ -28,7 +28,7 @@ Aplicativo Android para o controle de abastecimento dos veículos da GCM Serviç
 1. No celular, abra a página de versões do repositório e baixe `abastecimento-gcm.apk` da versão mais recente:
    https://github.com/glaydsonmj-ops/Abastecimento_Repositorio_GCM/releases/latest
 2. Abra o arquivo e permita a instalação de apps desta fonte, se o Android pedir.
-3. No primeiro uso, informe a URL do app da Web e a chave (`CHAVE_APP`), escolha o técnico e o veículo.
+3. No primeiro uso, informe a URL do app da Web e a chave de acesso (Configurações!B8), escolha o técnico e o veículo.
 4. Permita as notificações para receber os lembretes das 8h e das 17h.
 
 ## Cadastros

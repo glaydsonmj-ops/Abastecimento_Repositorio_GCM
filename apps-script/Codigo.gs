@@ -4,8 +4,8 @@
  * Instalação (uma única vez):
  * 1. Abra a planilha "Controle de Abastecimento GCM Serviços".
  * 2. Menu Extensões > Apps Script. Apague o conteúdo e cole este arquivo.
- * 3. Em Configurações do projeto > Propriedades do script, crie a propriedade
- *    CHAVE_APP com uma senha qualquer (o app usará a mesma senha).
+ * 3. Defina a chave de acesso do app na aba Configurações (célula B8)
+ *    ou, se preferir, na propriedade do script CHAVE_APP.
  * 4. Implantar > Nova implantação > Tipo "App da Web".
  *    Executar como: Eu. Quem pode acessar: Qualquer pessoa.
  * 5. Copie a URL gerada; ela será configurada no aplicativo.
@@ -145,9 +145,11 @@ function linhas_(aba) {
   return n < 2 ? [] : aba.getRange(2, 1, n - 1, aba.getLastColumn()).getValues();
 }
 
+/** A chave fica na aba Configurações (B8) ou na propriedade do script CHAVE_APP. */
 function chaveValida_(chave) {
-  const esperada = PropertiesService.getScriptProperties().getProperty('CHAVE_APP');
-  return esperada && chave === esperada;
+  const esperada = PropertiesService.getScriptProperties().getProperty('CHAVE_APP') ||
+    String(config_().getRange('B8').getValue()).trim();
+  return !!esperada && chave === esperada;
 }
 
 function json_(obj) {
