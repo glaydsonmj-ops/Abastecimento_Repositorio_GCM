@@ -105,7 +105,7 @@ private sealed interface Tela {
 }
 
 /** Foto já processada: imagem com data e hora gravadas, nitidez e km lido. */
-private class Foto(val bitmap: Bitmap, val nitida: Boolean, val kmLido: Long?)
+private class Foto(val bitmap: Bitmap, val nitida: Boolean, val kmLido: Long?, val nota: Ocr.DadosNota? = null)
 
 @Composable
 private fun App(pedido: MutableState<String?>) {
@@ -120,6 +120,7 @@ private fun App(pedido: MutableState<String?>) {
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) permissao.launch(Manifest.permission.POST_NOTIFICATIONS)
         if (prefs.configurado) Lembretes.agendar(ctx)
+        Fila.agendar(ctx)
     }
     LaunchedEffect(pedido.value) {
         val p = pedido.value
@@ -477,14 +478,19 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
     var atualizar by remember { mutableIntStateOf(0) }
 
     var atualizando by remember { mutableStateOf(false) }
+    val ctx = LocalContext.current
+    var pendentes by remember { mutableIntStateOf(Fila.quantidade(ctx)) }
 
     LaunchedEffect(atualizar) {
         erro = null
         fun aplicar(r: JSONObject) {
             hoje = r.optJSONObject("hoje")
             checklists = r.optJSONArray("checklists")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } } ?: emptyList()
+            // O responsável pode trocar o veículo do técnico pela gestão de frota.
+            r.optString("placa").takeIf { it.isNotBlank() && it != prefs.placa }?.let { prefs.placa = it }
             val vs = r.optJSONArray("veiculos") ?: org.json.JSONArray()
             veiculo = (0 until vs.length()).map { vs.getJSONObject(it) }.firstOrNull { it.optString("placa") == prefs.placa }
+            veiculo?.optLong("kmAtual")?.takeIf { it > prefs.ultimoKm }?.let { prefs.ultimoKm = it }
         }
         // Mostra na hora os últimos dados guardados no aparelho e atualiza em seguida.
         val dia = SimpleDateFormat("yyyy-MM-dd", BR).format(Date())
@@ -497,6 +503,8 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
         }
         atualizando = true
         try {
+            // Primeiro envia o que ficou guardado sem internet.
+            if (Fila.quantidade(ctx) > 0) { Fila.enviar(ctx); pendentes = Fila.quantidade(ctx); if (pendentes > 0) Fila.agendar(ctx) }
             val url = prefs.url + "?tecnico=" + Uri.encode(prefs.tecnico) + "&placa=" + Uri.encode(prefs.placa)
             val r = Api.consultar(url, prefs.senha)
             aplicar(r)
@@ -528,6 +536,7 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
         }
         if (erro != null && hoje != null) Aviso(erro!!, Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning)
         aviso?.let { Aviso(it, Cores.VERDE_CLARO, Cores.VERDE, Icons.Filled.CheckCircle) }
+        if (pendentes > 0) Aviso("$pendentes registro(s) guardado(s) no celular, aguardando internet para enviar.", Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning)
 
         CartaoAlertas()
 
@@ -654,10 +663,13 @@ private fun rememberCamera(aoTirar: (Uri) -> Unit): () -> Unit {
 private suspend fun processar(ctx: Context, uri: Uri, prefs: Prefs, lerKm: Boolean): Foto {
     val original = withContext(Dispatchers.Default) { Imagem.carregar(ctx, uri) }
     val nitida = withContext(Dispatchers.Default) { Imagem.nitidez(original) >= Imagem.NITIDEZ_MINIMA }
-    val kmLido = if (lerKm) try { Ocr.extrairKm(Ocr.ler(original), null) } catch (e: Exception) { null } else null
+    // Leitura automática no próprio celular: km do hodômetro (painel) ou litros e valor (nota).
+    val texto = try { Ocr.ler(original) } catch (e: Exception) { null }
+    val kmLido = if (lerKm && texto != null) try { Ocr.extrairKm(texto, prefs.ultimoKm.takeIf { it > 0 }) } catch (e: Exception) { null } else null
+    val nota = if (!lerKm && texto != null) try { Ocr.extrairNota(texto) } catch (e: Exception) { null } else null
     val carimbo = SimpleDateFormat("dd/MM/yyyy HH:mm", BR).format(Date()) + "  " + prefs.tecnico + "  " + prefs.placa
     val final = withContext(Dispatchers.Default) { Imagem.carimbar(original, carimbo) }
-    return Foto(final, nitida, kmLido)
+    return Foto(final, nitida, kmLido, nota)
 }
 
 /** Bloco de foto: área para fotografar, miniatura e aviso de foto ilegível. */
@@ -722,7 +734,13 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
     val cameraNota = rememberCamera { uri ->
         ocupado = true; erro = null
         escopo.launch {
-            try { fotoNota = processar(ctx, uri, prefs, lerKm = false); tentativasNota++ }
+            try {
+                val f = processar(ctx, uri, prefs, lerKm = false)
+                fotoNota = f; tentativasNota++
+                // Preenche litros e valor lidos da nota (o técnico confere e corrige se precisar).
+                f.nota?.litros?.let { if (litros.isBlank()) litros = dec(it) }
+                f.nota?.valor?.let { valor = dec(it) }
+            }
             catch (e: Exception) { erro = "Erro ao processar a foto. Tente novamente." }
             finally { ocupado = false }
         }
@@ -730,7 +748,12 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
     val cameraPainel = rememberCamera { uri ->
         ocupado = true; erro = null
         escopo.launch {
-            try { fotoPainel = processar(ctx, uri, prefs, lerKm = true); tentativasPainel++ }
+            try {
+                val f = processar(ctx, uri, prefs, lerKm = true)
+                fotoPainel = f; tentativasPainel++
+                // Km lido da foto já vem preenchido; o técnico só confere.
+                f.kmLido?.let { kmTexto = it.toString() }
+            }
             catch (e: Exception) { erro = "Erro ao processar a foto. Tente novamente." }
             finally { ocupado = false }
         }
@@ -770,10 +793,14 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
             TituloSecao(if (etapa == Etapa.ABASTECIMENTO) 2 else 1, "Km do painel")
             BlocoFoto("Fotografar o painel", fotoPainel, ocupado, cameraPainel)
             if (fotoPainel != null) {
-                Campo(kmTexto, { kmTexto = it.filter(Char::isDigit) }, "Digite o km que aparece no painel", KeyboardType.Number)
                 val lido = fotoPainel?.kmLido
+                Campo(kmTexto, { kmTexto = it.filter(Char::isDigit) },
+                    if (lido != null) "Km lido da foto: confira e corrija se precisar" else "Digite o km que aparece no painel", KeyboardType.Number)
                 if (kmDigitado != null && lido != null && kmTexto.length >= 3 && abs(lido - kmDigitado) > 2) {
                     Aviso("Confira: na foto parece estar ${km(lido)}.", Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning)
+                }
+                if (kmDigitado != null && prefs.ultimoKm > 0 && kmDigitado < prefs.ultimoKm && kmTexto.length >= 3) {
+                    Aviso("Este km é menor que o último registrado (${km(prefs.ultimoKm)}). Confira antes de enviar.", Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning)
                 }
             }
         }
@@ -787,12 +814,19 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
                 val painel = fotoPainel ?: return@BotaoMarca
                 ocupado = true; erro = null
                 escopo.launch {
+                    var corpo: JSONObject? = null
                     try {
-                        val corpo = JSONObject()
+                        corpo = JSONObject()
                             .put("senha", prefs.senha)
                             .put("tecnico", prefs.tecnico).put("placa", prefs.placa)
                             .put("km", kmDigitado)
-                            .put("origem", if (painel.kmLido == kmDigitado) "Digitado (confere com a foto)" else "Digitado")
+                            .put("quando", System.currentTimeMillis())
+                            .put("id", "a" + System.currentTimeMillis() + "_" + (1000..9999).random())
+                            .put("origem", when {
+                                painel.kmLido == null -> "Digitado"
+                                painel.kmLido == kmDigitado -> "Lido da foto (confirmado pelo técnico)"
+                                else -> "Corrigido pelo técnico (foto: ${painel.kmLido})"
+                            })
                         if (etapa == Etapa.ABASTECIMENTO) {
                             val l = litrosNum ?: 0.0
                             corpo.put("tipo", "abastecimento")
@@ -807,9 +841,17 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
                                 .put("fotoBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(painel.bitmap) })
                         }
                         val r = Api.enviar(prefs.url, corpo)
+                        if (kmDigitado != null && kmDigitado > prefs.ultimoKm) prefs.ultimoKm = kmDigitado
                         aoConcluir(mensagemRetorno(r, etapa, prefs))
+                    } catch (e: Api.ErroServidor) {
+                        erro = "Não foi possível enviar: ${e.message}"
                     } catch (e: Exception) {
-                        erro = "Não foi possível enviar: ${e.message}. Verifique a internet e tente de novo."
+                        // Sem internet: guarda no celular e envia sozinho quando o sinal voltar.
+                        val c = corpo
+                        if (c != null && Fila.guardar(ctx, c)) {
+                            if (kmDigitado != null && kmDigitado > prefs.ultimoKm) prefs.ultimoKm = kmDigitado
+                            aoConcluir("Sem internet agora. O registro foi guardado no celular e será enviado automaticamente quando o sinal voltar.")
+                        } else erro = "Não foi possível enviar. Verifique a internet e tente de novo."
                     } finally { ocupado = false }
                 }
             },
@@ -834,6 +876,7 @@ private fun mensagemRetorno(r: JSONObject, etapa: Etapa, prefs: Prefs): String {
             partes += "Hoje você rodou ${km(h.opt("kmRodados"))} e gastou ${reais(h.optDouble("gasto", 0.0))} de combustível."
         }
     }
+    r.optString("avisoKm").takeIf { it.isNotBlank() }?.let { partes += it }
     val s = r.optJSONObject("situacao")
     if (s != null && s.optString("situacao") == "Abastecer") {
         partes += "Atenção: o veículo precisa ser abastecido (restam ${km(s.opt("kmRestantes"))}). O responsável foi avisado."

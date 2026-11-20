@@ -37,6 +37,11 @@ class Prefs(context: Context) {
         get() = sp.getString("ultimaConsulta", "") ?: ""
         set(v) = sp.edit().putString("ultimaConsulta", v).apply()
 
+    /** Último km conhecido do veículo (ajuda a leitura da foto e o aviso de km menor). */
+    var ultimoKm: Long
+        get() = sp.getLong("ultimoKm", 0)
+        set(v) = sp.edit().putLong("ultimoKm", v).apply()
+
     val configurado: Boolean
         get() = url.isNotBlank() && senha.isNotBlank() && tecnico.isNotBlank() && placa.isNotBlank()
 

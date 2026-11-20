@@ -22,8 +22,11 @@ object Api {
         verificar(requisicao(url, corpo.toString()))
     }
 
+    /** Erro devolvido pelo próprio sistema (não é falta de internet). */
+    class ErroServidor(msg: String) : IOException(msg)
+
     private fun verificar(resp: JSONObject): JSONObject {
-        if (!resp.optBoolean("ok")) throw IOException(resp.optString("erro", "Erro desconhecido no servidor"))
+        if (!resp.optBoolean("ok")) throw ErroServidor(resp.optString("erro", "Erro desconhecido no servidor"))
         return resp
     }
 
