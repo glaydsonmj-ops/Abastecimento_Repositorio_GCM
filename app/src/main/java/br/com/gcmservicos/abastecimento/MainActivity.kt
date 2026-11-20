@@ -355,6 +355,7 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
             checklists = r.optJSONArray("checklists")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } } ?: emptyList()
             val vs = r.getJSONArray("veiculos")
             veiculo = (0 until vs.length()).map { vs.getJSONObject(it) }.firstOrNull { it.optString("placa") == prefs.placa }
+            prefs.salvarOleo(veiculo?.optJSONObject("oleo"))
             r.optJSONObject("config")?.let { c ->
                 prefs.consumoKmL = c.optDouble("consumoKmL", prefs.consumoKmL)
                 prefs.valorPadrao = c.optDouble("valorPadrao", prefs.valorPadrao)
@@ -366,6 +367,8 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
 
     Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         aviso?.let { Aviso(it, Cores.VERDE_CLARO, Cores.VERDE, Icons.Filled.CheckCircle) }
+
+        CartaoAlertas()
 
         // Checagem diária: o veículo está funcionando?
         hoje?.let { h -> CartaoChecagem(prefs, h) { atualizar++ } }
@@ -399,6 +402,7 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
                 "OK" -> Aviso("Tanque: restam cerca de ${km(v.opt("kmRestantes"))}.", Cores.VERDE_CLARO, Cores.VERDE, Icons.Filled.CheckCircle)
             }
             AvisosPrevistos(v)
+            v.optJSONObject("oleo")?.let { o -> CartaoOleo(prefs, o) { nv -> veiculo = nv } }
         }
         val pendentes = checklists.filter { !it.optBoolean("feitoNaSemana") }
         if (pendentes.isNotEmpty()) {
