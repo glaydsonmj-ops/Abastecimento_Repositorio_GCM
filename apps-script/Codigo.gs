@@ -462,11 +462,44 @@ function paginaFrota_(chave) {
       ${chave ? '<p class="erro">Chave incorreta.</p>' : ''}</div>`;
   } else {
     const dados = JSON.stringify(dadosFrota_(cfg)).replace(/</g, '\\u003c');
-    corpo = `<div id="app"></div><script>const D=${dados};const URL_FROTA=${JSON.stringify(url + '?pagina=frota&chave=' + encodeURIComponent(chave))};</script><script>${JS_FROTA_}</script>`;
+    corpo = `<div id="app"></div><script>const D=${dados};const URL_FROTA=${JSON.stringify(url + '?pagina=frota&chave=' + encodeURIComponent(chave))};const CHAVE=${JSON.stringify(chave).replace(/</g, '\\u003c')};</script><script>${JS_FROTA_}</script>`;
   }
   return HtmlService.createHtmlOutput(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Gestão de frota GCM</title><style>${CSS_FROTA_}</style></head><body>${corpo}</body></html>`)
     .setTitle('Gestão de frota GCM')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/**
+ * Exclui um veículo da aba Veículos (chamado pelo botão "Excluir" da gestão de frota).
+ * O histórico (abastecimentos, leituras, checagens, check-lists, trocas de óleo e alertas) é mantido.
+ * As linhas abaixo sobem uma posição; a linha 2 não é apagada porque guarda as fórmulas das colunas E:K.
+ */
+function excluirVeiculo(chave, placa) {
+  const cfg = parametros_();
+  if (!cfg.chaveFrota || chave !== cfg.chaveFrota) throw new Error('Chave da gestão de frota inválida.');
+  placa = String(placa || '').trim();
+  if (!placa) throw new Error('Informe o veículo.');
+  const trava = LockService.getScriptLock();
+  trava.waitLock(20000);
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const aba = ss.getSheetByName(ABA.VEICULOS);
+    const n = aba.getLastRow() - 1;
+    if (n < 1) throw new Error('Veículo não encontrado.');
+    const dados = aba.getRange(2, 1, n, V.PLACA + 4).getValues();          // A:D
+    const extras = aba.getRange(2, V.OLEO_KM + 1, n, V.OLEO_AGENDADA - V.OLEO_KM + 1).getValues(); // L:P
+    const i = dados.findIndex(r => String(r[V.PLACA]).trim() === placa);
+    if (i < 0) throw new Error('Veículo não encontrado.');
+    const tira = (m, largura) => m.slice(0, i).concat(m.slice(i + 1), [Array(largura).fill('')]);
+    aba.getRange(2, 1, n, 4).setValues(tira(dados, 4));
+    aba.getRange(2, V.OLEO_KM + 1, n, extras[0].length).setValues(tira(extras, extras[0].length));
+    const vinculados = linhas_(ss.getSheetByName(ABA.TECNICOS)).filter(t => t[0] && t[2] === placa).map(t => t[0]);
+    ss.getSheetByName(ABA.ALERTAS).appendRow([new Date(), placa, vinculados.join(', '), '', '', 'Veículo excluído']);
+    SpreadsheetApp.flush();
+    return { ok: true, placa, tecnicos: vinculados };
+  } finally {
+    trava.releaseLock();
+  }
 }
 
 function dadosFrota_(cfg) {
@@ -582,6 +615,8 @@ td{padding:10px 8px;border-bottom:1px solid var(--linha);vertical-align:top}tr:l
 .vazio{color:var(--suave);font-size:14px}
 .login{max-width:380px;margin:60px auto;background:#fff;border-radius:20px;padding:28px;text-align:center;box-shadow:0 2px 10px rgba(5,37,69,.1)}
 .login img{width:180px}.login input{width:100%;padding:12px;border:2px solid var(--linha);border-radius:12px;font-size:16px;margin:8px 0}
+button.excluir{background:#fff;color:var(--vermelho);border:1.5px solid var(--vermelho);padding:6px 12px;font-size:13px;border-radius:10px}
+button.excluir:hover{background:var(--vermelho-c)}button.excluir:disabled{opacity:.6;cursor:wait}
 .login button{width:100%;background:linear-gradient(90deg,var(--magenta),var(--laranja));color:#fff;padding:14px}.erro{color:var(--vermelho)}
 `;
 
@@ -603,8 +638,8 @@ h+='<section class="kpis">'+
  '<div class="kpi"><small>Km rodados no mês</small><b>'+N(k.kmMes)+' km</b></div>'+
  '<div class="kpi"><small>Litros no mês</small><b>'+N(k.litrosMes)+' L</b></div>'+
  '<div class="kpi"><small>Custo por km</small><b>'+R(k.custoKm)+'</b></div></section>';
-h+='<section class="cartao"><h2>Veículos</h2><div class="tabela"><table><tr><th>Veículo</th><th>Técnico</th><th>Km atual</th><th>Combustível</th><th>Estado</th><th>Troca de óleo</th><th>Seguro obrigatório</th><th>Mês</th></tr>';
-if(!D.frota.length)h+='<tr><td colspan="8" class="vazio">Nenhum veículo cadastrado.</td></tr>';
+h+='<section class="cartao"><h2>Veículos</h2><div class="tabela"><table><tr><th>Veículo</th><th>Técnico</th><th>Km atual</th><th>Combustível</th><th>Estado</th><th>Troca de óleo</th><th>Seguro obrigatório</th><th>Mês</th><th></th></tr>';
+if(!D.frota.length)h+='<tr><td colspan="9" class="vazio">Nenhum veículo cadastrado.</td></tr>';
 D.frota.forEach(f=>{
  const ch=f.ultimaChecagem;
  const est=f.emManutencao?selo('Em manutenção','ruim'):selo('Funcionando','ok');
@@ -614,7 +649,8 @@ D.frota.forEach(f=>{
  '<td>'+(E(f.tecnicos)||'<span class="sub">—</span>')+'</td><td>'+N(f.kmAtual)+' km</td>'+
  '<td>'+selo(f.situacao==='Sem abastecimento registrado'?'Sem registro':f.situacao,cls[f.situacao]||'neutro')+(f.situacao!=='Sem abastecimento registrado'?'<div class="sub">Restam '+N(f.kmRestantes)+' km</div>':'')+'</td>'+
  '<td>'+est+(ch?'<div class="sub">Checagem '+E(ch.data)+(ch.problema?': '+E(ch.problema):'')+'</div>':'<div class="sub">Sem checagem</div>')+'</td>'+
- '<td>'+oleo+'</td><td>'+seg+'</td><td>'+R(f.gastoMes)+'<div class="sub">'+N(f.kmMes)+' km</div></td></tr>';
+ '<td>'+oleo+'</td><td>'+seg+'</td><td>'+R(f.gastoMes)+'<div class="sub">'+N(f.kmMes)+' km</div></td>'+
+ '<td><button class="excluir" data-placa="'+E(f.placa)+'" data-tecnicos="'+E(f.tecnicos)+'">Excluir</button></td></tr>';
 });
 h+='</table></div></section>';
 const mx=Math.max(1,...D.dias.map(d=>d.gasto));
@@ -633,4 +669,14 @@ h+='<section class="cartao"><h2>Check-lists da semana</h2><div class="tabela"><t
  (c.problemas.length?'<div class="sub" style="color:var(--vermelho)">'+c.problemas.map(p=>E(p.item)+': '+E(p.condicao)+(p.observacao?' ('+E(p.observacao)+')':'')).join('<br>')+'</div>':'')+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="3" class="vazio">Nenhum técnico.</td></tr>')+'</table></div></section>';
 h+='<p class="sub" style="text-align:center">Para cadastrar troca de óleo, vencimento do seguro ou retirar a manutenção, use a aba Veículos da planilha. Os itens dos check-lists ficam na aba Itens dos check-lists.</p></main>';
 document.getElementById('app').innerHTML=h;
+document.querySelectorAll('button.excluir').forEach(b=>b.addEventListener('click',()=>{
+ const placa=b.dataset.placa,tec=b.dataset.tecnicos;
+ let msg='Deseja realmente excluir o veículo '+placa+'?'+' O histórico de abastecimentos, leituras e check-lists será mantido na planilha.';
+ if(tec)msg+=' Atenção: o veículo está vinculado a '+tec+'. Ajuste a aba Técnicos depois.';
+ if(!confirm(msg))return;
+ b.disabled=true;b.textContent='Excluindo…';
+ google.script.run.withSuccessHandler(()=>{window.top.location.href=URL_FROTA;})
+  .withFailureHandler(e=>{b.disabled=false;b.textContent='Excluir';alert('Não foi possível excluir: '+(e&&e.message||e));})
+  .excluirVeiculo(CHAVE,placa);
+}));
 `;
