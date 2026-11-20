@@ -2,6 +2,10 @@ package br.com.gcmservicos.abastecimento
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.util.Base64
@@ -64,5 +68,24 @@ object Imagem {
         return somaQ / n - media * media
     }
 
-    const val NITIDEZ_MINIMA = 60.0
+    const val NITIDEZ_MINIMA = 45.0
+
+    /** Grava data, hora e identificação no canto da foto. */
+    fun carimbar(bitmap: Bitmap, texto: String): Bitmap {
+        val b = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val c = Canvas(b)
+        val tam = maxOf(b.width, b.height) * 0.028f
+        val letra = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.YELLOW
+            textSize = tam
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val fundo = Paint().apply { color = Color.argb(170, 0, 0, 0) }
+        val largura = letra.measureText(texto)
+        val x = (b.width - largura - tam).coerceAtLeast(tam / 2)
+        val y = b.height - tam
+        c.drawRect(x - tam / 2, y - tam * 1.2f, minOf(b.width.toFloat(), x + largura + tam / 2), y + tam * 0.5f, fundo)
+        c.drawText(texto, x, y, letra)
+        return b
+    }
 }

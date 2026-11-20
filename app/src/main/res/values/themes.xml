@@ -1,5 +1,5 @@
 <resources>
     <style name="Tema" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:statusBarColor">#1F4F8C</item>
+        <item name="android:statusBarColor">#052545</item>
     </style>
 </resources>

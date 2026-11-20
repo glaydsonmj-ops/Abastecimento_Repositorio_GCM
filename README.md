@@ -2,8 +2,14 @@
 
 Aplicativo Android para o controle de abastecimento dos veículos da GCM Serviços.
 
-- O técnico fotografa o painel no início (8h) e no fim do dia (17h). O app lê o km automaticamente (Google ML Kit, no próprio celular) e envia para a planilha.
-- No abastecimento, o técnico fotografa a nota, confere o valor (padrão R$ 180,00), os litros e os km que couberam no tanque (litros x 10 km/l).
+O app segue três etapas por dia:
+
+1. **Início do turno (8h):** foto do painel (com data e hora gravadas na imagem) e o km digitado logo abaixo.
+2. **Abastecimento:** foto legível da nota fiscal, valor colocado (padrão R$ 180,00), litros que couberam no tanque e nova foto do painel com o km.
+3. **Fim do turno (17h):** foto do painel, km digitado e "Encerrar turno".
+
+- A tela principal mostra sempre os km rodados no dia e o gasto de combustível (km ÷ 10 km/l × preço por litro da última nota).
+- O app confere o km digitado com o número lido na foto (Google ML Kit, no próprio celular) e avisa se não bater.
 - A planilha calcula os km restantes. Quando faltarem 20 km, o responsável recebe um e-mail informando qual técnico precisa abastecer.
 - A aba "Resumo diário" mostra os km rodados por técnico em cada dia.
 
@@ -19,7 +25,7 @@ Aplicativo Android para o controle de abastecimento dos veículos da GCM Serviç
 
 1. Abra a planilha e vá em **Extensões > Apps Script**.
 2. Apague o conteúdo do editor, cole o arquivo `apps-script/Codigo.gs` e salve.
-3. Em **Configurações do projeto** (ícone de engrenagem) > **Propriedades do script**, adicione `CHAVE_APP` com uma senha de sua escolha.
+3. Defina a chave de acesso do app na aba **Configurações** da planilha (célula B8). Opcionalmente, ela pode ficar na propriedade do script `CHAVE_APP`, que tem prioridade.
 4. Clique em **Implantar > Nova implantação**, tipo **App da Web**. Executar como: **Eu**. Quem pode acessar: **Qualquer pessoa**.
 5. Autorize o acesso quando o Google pedir e copie a **URL do app da Web**.
 
@@ -28,7 +34,7 @@ Aplicativo Android para o controle de abastecimento dos veículos da GCM Serviç
 1. No celular, abra a página de versões do repositório e baixe `abastecimento-gcm.apk` da versão mais recente:
    https://github.com/glaydsonmj-ops/Abastecimento_Repositorio_GCM/releases/latest
 2. Abra o arquivo e permita a instalação de apps desta fonte, se o Android pedir.
-3. No primeiro uso, informe a URL do app da Web e a chave (`CHAVE_APP`), escolha o técnico e o veículo.
+3. No primeiro uso, basta escolher o técnico. O endereço do sistema já vem no app (`Sistema.kt`). A chave de acesso (Configurações!B8) é embutida na geração do APK pelo segredo `CHAVE_APP` do repositório; sem esse segredo, o app pede a chave uma única vez.
 4. Permita as notificações para receber os lembretes das 8h e das 17h.
 
 ## Cadastros

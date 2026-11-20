@@ -7,10 +7,10 @@ class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("config", Context.MODE_PRIVATE)
 
     var url: String
-        get() = sp.getString("url", "") ?: ""
+        get() = sp.getString("url", null)?.takeIf { it.isNotBlank() } ?: Sistema.URL
         set(v) = sp.edit().putString("url", v.trim()).apply()
     var chave: String
-        get() = sp.getString("chave", "") ?: ""
+        get() = sp.getString("chave", null)?.takeIf { it.isNotBlank() } ?: Sistema.CHAVE
         set(v) = sp.edit().putString("chave", v.trim()).apply()
     var tecnico: String
         get() = sp.getString("tecnico", "") ?: ""

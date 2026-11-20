@@ -14,6 +14,7 @@ android {
         targetSdk = 35
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = "1.0.${System.getenv("VERSION_CODE") ?: "0"}"
+        buildConfigField("String", "CHAVE_APP", "\"" + (System.getenv("CHAVE_APP") ?: "") + "\"")
     }
 
     signingConfigs {
@@ -48,7 +49,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 }
 
 dependencies {
