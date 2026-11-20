@@ -143,6 +143,7 @@ function doPost(e) {
 /** Registro usado pelo app Android (POST) e pela versão web (iPhone). */
 function registrar_(d) {
   if (d.tipo === 'login') return login_(d);
+  if (d.tipo === 'cadastro') return cadastro_(d);
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
@@ -460,6 +461,70 @@ function login_(d) {
     config: { consumoKmL: cfg.consumo, antecedenciaKm: cfg.antecedencia, valorPadrao: cfg.valorPadrao,
               lembreteInicio: cfg.lembreteInicio, lembreteFim: cfg.lembreteFim },
   };
+}
+
+/**
+ * Cadastro feito pelo próprio técnico no primeiro acesso:
+ * { nome, email, placa, modelo, ano, cor, senha }.
+ * Cria o técnico na aba Técnicos e, se a placa ainda não existir, o veículo na aba Veículos.
+ * O responsável recebe um e-mail avisando do novo cadastro.
+ */
+function cadastro_(d) {
+  const nome = String(d.nome || '').trim().replace(/\s+/g, ' ');
+  const placa = String(d.placa || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const senha = String(d.senha == null ? '' : d.senha).trim();
+  const email = String(d.email || '').trim();
+  if (nome.split(' ').length < 2) return { ok: false, erro: 'Digite seu nome e sobrenome.' };
+  if (placa.length < 6 || placa.length > 8) return { ok: false, erro: 'Digite a placa do veículo (ex.: ABC1D23).' };
+  if (!/^\d{4}$/.test(senha)) return { ok: false, erro: 'A senha deve ter 4 números.' };
+  const trava = LockService.getScriptLock();
+  trava.waitLock(30000);
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const abaTec = ss.getSheetByName(ABA.TECNICOS);
+    const existentes = linhas_(abaTec).filter(r => String(r[0]).trim().toLowerCase() === nome.toLowerCase());
+    if (existentes.length) return { ok: false, erro: 'Já existe um cadastro com este nome. Volte e entre com a sua senha.' };
+
+    const abaV = ss.getSheetByName(ABA.VEICULOS);
+    const nV = abaV.getLastRow();
+    const placas = nV >= 2 ? abaV.getRange(2, 1, nV - 1, 1).getValues().map(r => String(r[0]).trim()) : [];
+    const existe = placas.some(p => p.toUpperCase().replace(/[^A-Z0-9]/g, '') === placa);
+    const placaFinal = existe ? placas.find(p => p.toUpperCase().replace(/[^A-Z0-9]/g, '') === placa) : placa;
+    if (!existe) {
+      // Primeira linha vazia na coluna A (as colunas E:K são calculadas pelas fórmulas da linha 2).
+      let i = placas.findIndex(p => !p);
+      if (i < 0) i = placas.length;
+      abaV.getRange(i + 2, 1, 1, 4).setValues([[placa, String(d.modelo || '').trim(), String(d.ano || '').trim(), String(d.cor || '').trim()]]);
+      abaV.getRange(i + 2, V.MANUTENCAO + 1).setValue('Não');
+    }
+
+    const nT = abaTec.getLastRow();
+    const nomesT = nT >= 2 ? abaTec.getRange(2, 1, nT - 1, 1).getValues().map(r => String(r[0]).trim()) : [];
+    let j = nomesT.findIndex(x => !x);
+    if (j < 0) j = nomesT.length;
+    abaTec.getRange(j + 2, 5).setNumberFormat('@');
+    abaTec.getRange(j + 2, 1, 1, 5).setValues([[nome, email, placaFinal, 'Sim', senha]]);
+    SpreadsheetApp.flush();
+
+    const cfg = parametros_();
+    if (cfg.email) {
+      try {
+        MailApp.sendEmail(cfg.email, `Novo técnico cadastrado: ${nome} (${placaFinal})`,
+          `Prezado Glaydson,\n\n${nome} fez o cadastro no aplicativo de combustível.\n\n` +
+          `Veículo: ${placaFinal}${existe ? ' (já cadastrado)' : ' ' + [d.modelo, d.ano, d.cor].filter(Boolean).join(' · ') + ' (novo)'}\n` +
+          (email ? `E-mail: ${email}\n` : '') +
+          `\nPara desativar, coloque "Não" na coluna "Ativo" da aba Técnicos.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+      } catch (err) { console.error(err); }
+    }
+    const placasTodas = linhas_(abaV).filter(r => r[V.PLACA]).map(r => String(r[V.PLACA]));
+    return {
+      ok: true, primeiroAcesso: true, tecnico: nome, placa: placaFinal, placas: placasTodas,
+      config: { consumoKmL: cfg.consumo, antecedenciaKm: cfg.antecedencia, valorPadrao: cfg.valorPadrao,
+                lembreteInicio: cfg.lembreteInicio, lembreteFim: cfg.lembreteFim },
+    };
+  } finally {
+    trava.releaseLock();
+  }
 }
 
 /** Funções chamadas pela versão web (google.script.run). Devolvem texto JSON. */
@@ -919,7 +984,7 @@ function appTecnico_() {
     const L = estado.login;
     const t = L.escolhido;
     let h = '<h2>Quem é você?</h2>';
-    if (!L.tecnicos.length) h += '<div class="aviso erro">Nenhum técnico cadastrado. Peça ao responsável para cadastrar você.</div>';
+    if (!L.tecnicos.length) h += '<div class="aviso erro">Ainda não há técnicos cadastrados. Toque em Primeiro acesso abaixo.</div>';
     L.tecnicos.forEach((x, i) => { h += '<button class="opcao' + (t === x ? ' sel' : '') + '" data-acao="escolher" data-i="' + i + '">👤 ' + E(x.nome) + '</button>'; });
     if (t) {
       if (t.temSenha) {
@@ -932,6 +997,7 @@ function appTecnico_() {
       if (erro) h += '<div class="aviso erro">' + E(erro) + '</div>';
       h += '<button class="btn" data-acao="entrar">Entrar</button>';
     }
+    h += '<button class="btn contorno" data-acao="cadastro">✍️ Primeiro acesso? Fazer meu cadastro</button>';
     document.getElementById('login').innerHTML = h;
     const s = document.getElementById('senha'); if (s) s.focus();
   }
@@ -948,6 +1014,41 @@ function appTecnico_() {
       if (sessao.placa) { gravar(sessao); telaInicio(r.primeiroAcesso ? 'Senha criada. Bem-vindo!' : ''); }
       else telaVeiculo(r.placas);
     }).catch(e => desenharLogin(e.message));
+  };
+
+  // ---------------------------------------------------------------- Cadastro do técnico
+  const CAMPOS_CAD = [['nome', 'Seu nome e sobrenome', 'text', 'words'], ['email', 'Seu e-mail (opcional)', 'email', 'none'],
+    ['placa', 'Placa do veículo', 'text', 'characters'], ['modelo', 'Modelo do veículo', 'text', 'words'],
+    ['ano', 'Ano do veículo', 'number', 'none'], ['cor', 'Cor do veículo', 'text', 'words']];
+  ac.cadastro = () => { estado = { cad: {} }; desenharCadastro(); };
+  function desenharCadastro(erro) {
+    const c = estado.cad;
+    let x = '<div class="cartao"><h2>Seus dados</h2><p class="sub">Preencha uma única vez. Depois, é só entrar com o nome e a senha.</p>';
+    CAMPOS_CAD.forEach(f => {
+      x += '<label for="cad_' + f[0] + '">' + f[1] + '</label><input id="cad_' + f[0] + '" type="' + (f[2] === 'number' ? 'text' : f[2]) + '"' +
+        (f[2] === 'number' ? ' inputmode="numeric" maxlength="4"' : '') + ' autocapitalize="' + f[3] + '" value="' + E(c[f[0]] || '') + '">';
+    });
+    x += '</div><div class="cartao"><h2>Crie sua senha</h2><label for="cad_senha">Senha (4 números)</label><input id="cad_senha" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password">' +
+      '<label for="cad_senha2">Repita a senha</label><input id="cad_senha2" class="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password"></div>' +
+      (erro ? '<div class="aviso erro">' + E(erro) + '</div>' : '') + '<button class="btn" data-acao="salvarCadastro">Cadastrar e entrar</button>';
+    tela('Primeiro acesso', 'Cadastro do técnico', x, true);
+    ac.voltar = () => { ac.voltar = () => telaInicio(); telaLogin(); };
+  }
+  ac.salvarCadastro = b => {
+    const c = estado.cad;
+    CAMPOS_CAD.forEach(f => { c[f[0]] = (document.getElementById('cad_' + f[0]).value || '').trim(); });
+    const senha = document.getElementById('cad_senha').value.trim();
+    if (c.nome.split(/ +/).length < 2) return desenharCadastro('Digite seu nome e sobrenome.');
+    if (!c.placa) return desenharCadastro('Digite a placa do veículo.');
+    if (!/^[0-9]{4}$/.test(senha)) return desenharCadastro('A senha deve ter 4 números.');
+    if (document.getElementById('cad_senha2').value.trim() !== senha) return desenharCadastro('As senhas não são iguais.');
+    b.disabled = true; b.textContent = 'Cadastrando...';
+    chamar('webRegistrar', Object.assign({ tipo: 'cadastro', senha }, c)).then(r => {
+      sessao = { tecnico: r.tecnico, senha, placa: r.placa };
+      gravar(sessao);
+      ac.voltar = () => telaInicio();
+      telaInicio('Cadastro feito. Bem-vindo, ' + r.tecnico.split(' ')[0] + '!');
+    }).catch(e => desenharCadastro(e.message));
   };
 
   function telaVeiculo(placas) {

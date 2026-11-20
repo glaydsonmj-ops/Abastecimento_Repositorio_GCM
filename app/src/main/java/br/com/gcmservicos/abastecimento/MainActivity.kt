@@ -252,6 +252,8 @@ private fun TelaEscolher(prefs: Prefs, aoConcluir: () -> Unit) {
     var placa by remember { mutableStateOf("") }
     var logado by remember { mutableStateOf(false) }
     var tentativa by remember { mutableIntStateOf(0) }
+    var cadastrando by remember { mutableStateOf(false) }
+    var cad by remember { mutableStateOf(mapOf<String, String>()) }
 
     LaunchedEffect(tentativa) {
         carregando = true; erro = null
@@ -260,7 +262,7 @@ private fun TelaEscolher(prefs: Prefs, aoConcluir: () -> Unit) {
             val ts = r.getJSONArray("tecnicos")
             tecnicos = (0 until ts.length()).map { ts.getJSONObject(it) }
             escolhido = tecnicos.firstOrNull { it.optString("nome") == prefs.tecnico }
-            if (tecnicos.isEmpty()) erro = "Nenhum técnico cadastrado. Peça ao responsável para cadastrar você na planilha."
+            if (tecnicos.isEmpty()) erro = "Ainda não há técnicos cadastrados. Toque em \"Primeiro acesso\" abaixo."
         } catch (e: Exception) {
             erro = "Sem conexão com o sistema. Verifique a internet e tente de novo."
         } finally {
@@ -280,6 +282,58 @@ private fun TelaEscolher(prefs: Prefs, aoConcluir: () -> Unit) {
             Text("Qual veículo você usa?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             placas.forEach { p -> CartaoOpcao(p, null, placa == p) { placa = p } }
             BotaoMarca("Continuar", { concluir(escolhido?.optString("nome") ?: "", placa) }, habilitado = placa.isNotBlank())
+            return@Column
+        }
+        if (cadastrando) {
+            // Primeiro acesso: o técnico cadastra o próprio nome, o veículo e a senha.
+            Text("Primeiro acesso", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("Preencha uma única vez. Depois, é só entrar com o nome e a senha.", color = Cores.SUAVE)
+            Cartao {
+                Text("Seus dados", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                CAMPOS_CADASTRO.forEach { (chave, rotulo, teclado) ->
+                    Campo(cad[chave] ?: "", { v -> cad = cad + (chave to (if (chave == "placa") v.uppercase() else v)) }, rotulo, teclado)
+                }
+            }
+            Cartao {
+                Text("Crie sua senha", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                CampoSenha(senha, { senha = it }, "Senha (4 números)")
+                CampoSenha(senha2, { senha2 = it }, "Repita a senha")
+            }
+            erro?.let { Erro(it) }
+            BotaoMarca(
+                if (carregando) "Cadastrando..." else "Cadastrar e entrar",
+                {
+                    val nome = (cad["nome"] ?: "").trim()
+                    erro = when {
+                        nome.split(Regex(" +")).size < 2 -> "Digite seu nome e sobrenome."
+                        (cad["placa"] ?: "").isBlank() -> "Digite a placa do veículo."
+                        senha != senha2 -> "As senhas não são iguais."
+                        else -> null
+                    }
+                    if (erro != null) return@BotaoMarca
+                    carregando = true
+                    escopo.launch {
+                        try {
+                            val corpo = JSONObject().put("tipo", "cadastro").put("senha", senha)
+                            CAMPOS_CADASTRO.forEach { (chave, _, _) -> corpo.put(chave, (cad[chave] ?: "").trim()) }
+                            val r = Api.enviar(prefs.url, corpo)
+                            r.optJSONObject("config")?.let { c ->
+                                prefs.consumoKmL = c.optDouble("consumoKmL", 10.0)
+                                prefs.valorPadrao = c.optDouble("valorPadrao", 180.0)
+                                prefs.lembreteInicio = c.optString("lembreteInicio", "08:00")
+                                prefs.lembreteFim = c.optString("lembreteFim", "17:00")
+                            }
+                            concluir(r.optString("tecnico", nome), r.optString("placa"))
+                        } catch (e: Exception) {
+                            erro = e.message ?: "Sem conexão com o sistema."
+                        } finally {
+                            carregando = false
+                        }
+                    }
+                },
+                habilitado = !carregando && senha.length == 4 && senha2.length == 4
+            )
+            TextButton(onClick = { cadastrando = false; erro = null; senha = ""; senha2 = "" }) { Text("Voltar", color = Cores.SUAVE) }
             return@Column
         }
         Text("Quem é você?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -337,8 +391,21 @@ private fun TelaEscolher(prefs: Prefs, aoConcluir: () -> Unit) {
                 )
             }
         }
+        OutlinedButton(
+            onClick = { cadastrando = true; escolhido = null; senha = ""; senha2 = ""; erro = null },
+            shape = CANTO_CAMPO, modifier = Modifier.fillMaxWidth().height(56.dp)
+        ) { Text("Primeiro acesso? Fazer meu cadastro", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
     }
 }
+
+private val CAMPOS_CADASTRO = listOf(
+    Triple("nome", "Seu nome e sobrenome", KeyboardType.Text),
+    Triple("email", "Seu e-mail (opcional)", KeyboardType.Email),
+    Triple("placa", "Placa do veículo", KeyboardType.Text),
+    Triple("modelo", "Modelo do veículo", KeyboardType.Text),
+    Triple("ano", "Ano do veículo", KeyboardType.Number),
+    Triple("cor", "Cor do veículo", KeyboardType.Text),
+)
 
 @Composable
 private fun CampoSenha(valor: String, aoMudar: (String) -> Unit, rotulo: String) {
