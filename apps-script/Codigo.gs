@@ -25,6 +25,7 @@ const ABA = {
   OLEO: 'Trocas de óleo',
   ITENS: 'Itens dos check-lists',
   CHECKLISTS: 'Check-lists',
+  SEGURO_MENSAL: 'Seguro mensal',
 };
 const CHECKLISTS = ['Segurança do veículo', 'Ferramental e EPI'];
 const TZ = 'America/Sao_Paulo';
@@ -84,13 +85,15 @@ function parametros_() {
   return cfg;
 }
 function lerParametros_() {
-  const v = config_().getRange('B2:B12').getValues().map(l => l[0]);
+  const v = config_().getRange('B2:B13').getValues().map(l => l[0]);
   const hora = x => x instanceof Date ? Utilities.formatDate(x, TZ, 'HH:mm') : String(x || '');
   return {
     consumo: Number(v[0]) || 10, antecedencia: Number(v[1]) || 20, email: String(v[2] || '').trim(),
     valorPadrao: Number(v[3]) || 180, lembreteInicio: hora(v[4]) || '08:00', lembreteFim: hora(v[5]) || '17:00',
     oleoIntervalo: Number(v[7]) || 5000, oleoAviso: Number(v[8]) || 500, seguroAviso: Number(v[9]) || 30,
     chaveFrota: String(v[10] || '').trim(),
+    // Dia do mês para anexar o boleto e o comprovante do seguro obrigatório (Configurações!B13).
+    seguroDia: Math.min(28, Math.max(1, Number(v[11]) || 20)),
   };
 }
 
@@ -118,7 +121,52 @@ function manutencaoPrevista_(r, cfg) {
   } else {
     seguro.situacao = 'Sem registro';
   }
+  seguro.mensal = seguroMensal_(r[V.PLACA], new Date(), cfg);
   return { oleo, seguro };
+}
+
+/**
+ * Aba onde ficam o boleto e o comprovante de pagamento mensais do seguro obrigatório.
+ * É criada na primeira vez, junto com o parâmetro do dia (Configurações!A13:B13).
+ */
+function abaSeguroMensal_() {
+  const ss = SpreadsheetApp.getActive();
+  let aba = ss.getSheetByName(ABA.SEGURO_MENSAL);
+  if (!aba) {
+    aba = ss.insertSheet(ABA.SEGURO_MENSAL);
+    aba.appendRow(['Data e hora', 'Técnico', 'Placa', 'Mês de referência', 'Foto do boleto (link)', 'Foto do comprovante (link)']);
+    aba.setFrozenRows(1);
+    aba.getRange('D:D').setNumberFormat('@');
+    const cfg = config_();
+    if (!cfg.getRange('A13').getValue()) cfg.getRange('A13:B13').setValues([['Dia do mês para anexar boleto e comprovante do seguro', 20]]);
+  }
+  return aba;
+}
+
+/**
+ * Situação do mês: o técnico anexa o boleto e o comprovante de pagamento do seguro
+ * obrigatório a partir do dia configurado (padrão 20); fica pendente até anexar.
+ */
+function seguroMensal_(placa, agora, cfg) {
+  const mesIso = Utilities.formatDate(agora, TZ, 'yyyy-MM');
+  const diaHoje = Number(Utilities.formatDate(agora, TZ, 'd'));
+  const aba = SpreadsheetApp.getActive().getSheetByName(ABA.SEGURO_MENSAL);
+  const envio = aba ? linhas_(aba).filter(l => l[2] === placa && mesRef_(l[3]) === mesIso).pop() : null;
+  const [a, m] = mesIso.split('-');
+  return {
+    dia: cfg.seguroDia, mesIso, mes: m + '/' + a,
+    dataLembrete: String(cfg.seguroDia).padStart(2, '0') + '/' + m + '/' + a,
+    enviado: !!envio,
+    enviadoEm: envio ? Utilities.formatDate(new Date(envio[0]), TZ, 'dd/MM/yyyy HH:mm') : '',
+    enviadoPor: envio ? String(envio[1]) : '',
+    boleto: envio ? String(envio[4] || '') : '', comprovante: envio ? String(envio[5] || '') : '',
+    pendente: !envio && diaHoje >= cfg.seguroDia,
+  };
+}
+
+/** Mês de referência gravado na aba (texto "aaaa-mm" ou data). */
+function mesRef_(x) {
+  return x instanceof Date ? Utilities.formatDate(x, TZ, 'yyyy-MM') : String(x || '').trim();
 }
 
 function veiculoJson_(r, cfg) {
@@ -240,6 +288,25 @@ function registrarTipo_(d, t, ss, agora, cfg) {
       }
       const r = linhas_(ss.getSheetByName(ABA.VEICULOS)).find(l => l[V.PLACA] === d.placa);
       return { ok: true, veiculo: veiculoJson_(r, cfg) };
+    }
+
+    if (d.tipo === 'seguro_mensal') {
+      if (!d.fotoBoletoBase64 || !d.fotoComprovanteBase64) return { ok: false, erro: 'Anexe a foto do boleto e a do comprovante de pagamento.' };
+      const mesIso = /^\d{4}-\d{2}$/.test(String(d.mes || '')) ? String(d.mes) : Utilities.formatDate(agora, TZ, 'yyyy-MM');
+      const aba = abaSeguroMensal_();
+      const boleto = salvarFoto_(d.fotoBoletoBase64, d.placa + '_seguro_boleto', agora);
+      const comprovante = salvarFoto_(d.fotoComprovanteBase64, d.placa + '_seguro_comprovante', agora);
+      aba.appendRow([agora, d.tecnico, d.placa, mesIso, boleto, comprovante]);
+      SpreadsheetApp.flush();
+      if (MEMO_) delete MEMO_[ABA.SEGURO_MENSAL];
+      if (cfg.email) {
+        const [a, m] = mesIso.split('-');
+        MailApp.sendEmail(cfg.email, `Seguro obrigatório ${m}/${a}: boleto e comprovante de ${d.tecnico} (${d.placa})`,
+          `Prezado Glaydson,\n\nO técnico ${d.tecnico} anexou o boleto e o comprovante de pagamento do seguro obrigatório ` +
+          `do veículo ${d.placa}, referente a ${m}/${a}.\n\nBoleto: ${boleto}\nComprovante: ${comprovante}\n\n` +
+          `Os arquivos também ficam na aba "${ABA.SEGURO_MENSAL}" da planilha.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+      }
+      return { ok: true, seguroMensal: seguroMensal_(d.placa, agora, cfg) };
     }
 
     const km = Number(d.km);
@@ -1030,7 +1097,8 @@ function dadosFrota_(cfg) {
       manutencao: frota.filter(f => f.emManutencao).length,
       abastecer: frota.filter(f => f.situacao === 'Abastecer').length,
       pendencias: frota.filter(f => ['Trocar em breve', 'Atrasada'].includes(f.oleo.situacao) ||
-                                    ['Vence em breve', 'Vencido'].includes(f.seguro.situacao)).length,
+                                    ['Vence em breve', 'Vencido'].includes(f.seguro.situacao) ||
+                                    (f.seguro.mensal && f.seguro.mensal.pendente)).length,
       gastoMes, kmMes,
       litrosMes: arred_(doMes.reduce((t, a) => t + (Number(a[5]) || 0), 0)),
       custoKm: kmMes > 0 ? arred_(gastoMes / kmMes) : 0,
@@ -1120,7 +1188,10 @@ D.frota.forEach(f=>{
  const ch=f.ultimaChecagem;
  const est=f.emManutencao?selo('Em manutenção','ruim'):selo('Funcionando','ok');
  const oleo=f.oleo.situacao==='Sem registro'?selo('Sem registro','neutro'):selo(f.oleo.situacao,cls[f.oleo.situacao])+'<div class="sub">Próxima: '+N(f.oleo.proximaTrocaKm)+' km ('+(f.oleo.kmFaltando<0?'passou '+N(-f.oleo.kmFaltando):'faltam '+N(f.oleo.kmFaltando))+' km)</div>'+(f.oleo.agendadaPara?'<div class="sub"><b>Agendada para '+E(f.oleo.agendadaPara)+'</b></div>':'');
- const seg=f.seguro.situacao==='Sem registro'?selo('Sem registro','neutro'):selo(f.seguro.situacao,cls[f.seguro.situacao])+'<div class="sub">Vence '+E(f.seguro.vencimento)+(f.seguro.diasRestantes>=0?' ('+f.seguro.diasRestantes+' dias)':'')+'</div>';
+ const sm=f.seguro.mensal||{};
+ const segMes=sm.enviado?'<div class="sub">'+selo('Boleto '+E(sm.mes)+' enviado','ok')+' <a href="'+E(sm.boleto)+'" target="_blank">Boleto</a> · <a href="'+E(sm.comprovante)+'" target="_blank">Comprovante</a></div>'
+  :sm.pendente?'<div class="sub">'+selo('Boleto '+E(sm.mes)+' pendente','ruim')+'</div>':(sm.dia?'<div class="sub">Boleto e comprovante a partir de '+E(sm.dataLembrete)+'</div>':'');
+ const seg=(f.seguro.situacao==='Sem registro'?selo('Sem registro','neutro'):selo(f.seguro.situacao,cls[f.seguro.situacao])+'<div class="sub">Vence '+E(f.seguro.vencimento)+(f.seguro.diasRestantes>=0?' ('+f.seguro.diasRestantes+' dias)':'')+'</div>')+segMes;
  h+='<tr><td><b>'+E(f.placa)+'</b><div class="sub">'+E([f.modelo,f.cor,f.ano].filter(Boolean).join(' · '))+'</div></td>'+
  '<td>'+(E(f.tecnicos)||'<span class="sub">—</span>')+'</td><td>'+N(f.kmAtual)+' km</td>'+
  '<td>'+selo(f.situacao==='Sem abastecimento registrado'?'Sem registro':f.situacao,cls[f.situacao]||'neutro')+(f.situacao!=='Sem abastecimento registrado'?'<div class="sub">Restam '+N(f.kmRestantes)+' km</div>':'')+'</td>'+
@@ -1454,6 +1525,11 @@ function appTecnico_() {
       const s = v.seguro || {};
       if (s.situacao === 'Vencido') x += '<div class="aviso erro">Seguro obrigatório vencido em ' + E(s.vencimento) + '.</div>';
       else if (s.situacao === 'Vence em breve') x += '<div class="aviso atencao">Seguro obrigatório vence em ' + E(s.vencimento) + ' (' + s.diasRestantes + ' dias).</div>';
+      // Dia 20 (ou o configurado): boleto e comprovante do seguro obrigatório do mês.
+      const sm = s.mensal;
+      if (sm && sm.pendente) x += '<div class="cartao" style="background:var(--laranja-c,#FFF1E6)"><h2>🧾 Seguro obrigatório de ' + E(sm.mes) + '</h2>' +
+        '<p class="sub">Anexe a foto do boleto e a do comprovante de pagamento.</p><button class="btn" data-acao="seguroMensal">Anexar boleto e comprovante</button></div>';
+      else if (sm && sm.enviado) x += '<p class="sub">🧾 Boleto e comprovante do seguro de ' + E(sm.mes) + ' enviados em ' + E(sm.enviadoEm) + '.</p>';
       const o = v.oleo || {};
       if (o.situacao && o.situacao !== 'Sem registro') {
         x += '<div class="cartao"><h2>🛢️ Troca de óleo</h2><p class="sub">' + E(o.situacao) + ' · próxima em ' + km(o.proximaTrocaKm) +
@@ -1564,11 +1640,40 @@ function appTecnico_() {
   raiz.addEventListener('change', ev => {
     const el = ev.target;
     if (!el.dataset || !el.dataset.foto || !el.files || !el.files[0]) return;
-    guardarCampos();
-    carimbar(el.files[0], el.dataset.foto === 'nota' ? 1600 : 1280)
-      .then(d => { estado.fotos[el.dataset.foto] = d; desenharRegistro(); })
-      .catch(e => desenharRegistro(e.message));
+    const desenhar = estado.seguro ? desenharSeguro : desenharRegistro;
+    if (!estado.seguro) guardarCampos();
+    carimbar(el.files[0], el.dataset.foto === 'painel' ? 1280 : 1600)
+      .then(d => { estado.fotos[el.dataset.foto] = d; desenhar(); })
+      .catch(e => desenhar(e.message));
   });
+
+  // ---------------------------------------------------------------- Seguro obrigatório (mensal)
+  ac.seguroMensal = () => { estado = { seguro: true, fotos: {}, r: estado.r, veiculo: estado.veiculo }; desenharSeguro(); };
+  function desenharSeguro(erro) {
+    const s = estado;
+    const sm = (s.veiculo && s.veiculo.seguro && s.veiculo.seguro.mensal) || {};
+    let x = '<p class="sub">Todo mês, a partir do dia ' + (sm.dia || 20) + ', anexe a foto do boleto do seguro obrigatório e a do comprovante de pagamento.</p>';
+    x += '<div class="cartao"><h2>1. Boleto</h2>' + blocoFoto('boleto', 'Fotografar ou escolher o boleto', s.fotos.boleto) + '</div>';
+    x += '<div class="cartao"><h2>2. Comprovante de pagamento</h2>' + blocoFoto('comprovante', 'Fotografar ou escolher o comprovante', s.fotos.comprovante) + '</div>';
+    if (erro) x += '<div class="aviso erro">' + E(erro) + '</div>';
+    x += '<button class="btn" data-acao="enviarSeguro" style="padding:20px">✓ Enviar boleto e comprovante</button>';
+    tela('Seguro obrigatório', 'Boleto e comprovante' + (sm.mes ? ' de ' + sm.mes : '') + ' · ' + hojeBr(), x, true);
+  }
+  ac.enviarSeguro = b => {
+    const s = estado;
+    if (!s.fotos.boleto) return desenharSeguro('Anexe a foto do boleto.');
+    if (!s.fotos.comprovante) return desenharSeguro('Anexe a foto do comprovante de pagamento.');
+    const agora = new Date();
+    const mes = agora.getFullYear() + '-' + String(agora.getMonth() + 1).padStart(2, '0');
+    const corpo = credenciais({ tipo: 'seguro_mensal', mes, quando: Date.now(), id: 'ws' + Date.now() + Math.random().toString(36).slice(2, 8),
+      fotoBoletoBase64: s.fotos.boleto.split(',')[1], fotoComprovanteBase64: s.fotos.comprovante.split(',')[1] });
+    b.disabled = true; b.textContent = 'Enviando...';
+    chamar('webRegistrar', corpo).then(() => telaInicio('Boleto e comprovante do seguro obrigatório enviados. Obrigado!'))
+      .catch(e => {
+        if (e.semConexao && guardarNaFila(corpo)) return telaInicio('Sem internet agora. O boleto e o comprovante foram guardados neste celular e serão enviados automaticamente quando a internet voltar.');
+        desenharSeguro('Não foi possível enviar: ' + e.message);
+      });
+  };
   /** Confere os campos e mostra o km em destaque para o técnico confirmar antes de enviar. */
   ac.conferirRegistro = () => {
     guardarCampos();

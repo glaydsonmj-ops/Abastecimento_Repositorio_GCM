@@ -32,6 +32,8 @@ object Lembretes {
     const val FIM = "Fim do dia"
     const val EXTRA_PERIODO = "periodo"
     private const val ID_OLEO = 3
+    private const val ID_SEGURO = 4
+    const val ABRIR_SEGURO = "seguro"
 
     fun criarCanal(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -128,9 +130,22 @@ object Lembretes {
                 intentAbrir(context, periodo, 11)
             )
             avisoOleo(Prefs(context))?.let { (titulo, texto) -> mostrar(context, ID_OLEO, titulo, texto, intentAbrir(context, null, 13)) }
+            avisoSeguro(Prefs(context))?.let { (titulo, texto) -> mostrar(context, ID_SEGURO, titulo, texto, intentAbrir(context, ABRIR_SEGURO, 14)) }
         } else {
             mostrar(context, 2, "Fim do expediente", "Tire a foto do km final do painel e encerre o turno.", intentAbrir(context, periodo, 12))
         }
+    }
+
+    /**
+     * Alerta do seguro obrigatório: a partir do dia configurado (padrão 20), até o técnico
+     * anexar o boleto e o comprovante de pagamento do mês.
+     */
+    fun avisoSeguro(prefs: Prefs, agora: Long = System.currentTimeMillis()): Pair<String, String>? {
+        val cal = Calendar.getInstance().apply { timeInMillis = agora }
+        val mes = SimpleDateFormat("yyyy-MM", Locale.US).format(agora)
+        if (cal.get(Calendar.DAY_OF_MONTH) < prefs.seguroDia || prefs.seguroMesEnviado == mes) return null
+        return "Seguro obrigatório: boleto e comprovante" to
+            "Anexe no app a foto do boleto e a do comprovante de pagamento do seguro obrigatório deste mês."
     }
 
     /** Texto do alerta de troca de óleo para o técnico, ou null quando não há o que avisar. */
@@ -187,7 +202,10 @@ class LembreteReceiver : BroadcastReceiver() {
                     val vs = r.optJSONArray("veiculos") ?: return@withTimeoutOrNull
                     for (i in 0 until vs.length()) {
                         val v = vs.getJSONObject(i)
-                        if (v.optString("placa") == prefs.placa) prefs.salvarOleo(v.optJSONObject("oleo"))
+                        if (v.optString("placa") == prefs.placa) {
+                            prefs.salvarOleo(v.optJSONObject("oleo"))
+                            prefs.salvarSeguro(v.optJSONObject("seguro"))
+                        }
                     }
                 }
             }
