@@ -59,6 +59,22 @@ class Prefs(context: Context) {
         get() = sp.getString("oleoAgendadaBr", "") ?: ""
         set(v) = sp.edit().putString("oleoAgendadaBr", v).apply()
 
+    // Seguro obrigatório mensal: boleto e comprovante a partir do dia configurado (padrão 20).
+    var seguroDia: Int
+        get() = sp.getInt("seguroDia", 20)
+        set(v) = sp.edit().putInt("seguroDia", v).apply()
+    /** Mês (aaaa-mm) em que o boleto e o comprovante já foram enviados. */
+    var seguroMesEnviado: String
+        get() = sp.getString("seguroMesEnviado", "") ?: ""
+        set(v) = sp.edit().putString("seguroMesEnviado", v).apply()
+
+    /** Guarda a situação mensal do seguro (objeto "seguro.mensal" devolvido pelo sistema). */
+    fun salvarSeguro(seguro: org.json.JSONObject?) {
+        val m = seguro?.optJSONObject("mensal") ?: return
+        seguroDia = m.optInt("dia", 20)
+        if (m.optBoolean("enviado")) seguroMesEnviado = m.optString("mesIso")
+    }
+
     /** Guarda a situação da troca de óleo do veículo (objeto "oleo" devolvido pelo sistema). */
     fun salvarOleo(oleo: org.json.JSONObject?) {
         if (oleo == null) return

@@ -105,6 +105,7 @@ private sealed interface Tela {
     data class Registro(val etapa: Etapa) : Tela
     data object Checklists : Tela
     data object Relatorio : Tela
+    data object Seguro : Tela
     data class Checklist(val nome: String, val itens: List<String>) : Tela
 }
 
@@ -130,7 +131,11 @@ private fun App(pedido: MutableState<String?>) {
         val p = pedido.value
         if (p != null && prefs.configurado) {
             // Às 8h a tela inicial pergunta primeiro se o veículo está funcionando.
-            tela = if (p == Lembretes.FIM) Tela.Registro(Etapa.FIM) else Tela.Inicio
+            tela = when (p) {
+                Lembretes.FIM -> Tela.Registro(Etapa.FIM)
+                Lembretes.ABRIR_SEGURO -> Tela.Seguro
+                else -> Tela.Inicio
+            }
         }
         pedido.value = null
     }
@@ -151,16 +156,18 @@ private fun App(pedido: MutableState<String?>) {
                 (t.etapa.numero?.let { "Turno · etapa $it de 2" } ?: "A qualquer hora · o turno continua aberto") + " · $hojeTexto") { tela = Tela.Inicio }
             Tela.Checklists -> Cabecalho("Check-lists", "Segurança do veículo, ferramental e EPI", null)
             Tela.Relatorio -> Cabecalho("Relatório", "Veículo ${prefs.placa}", null)
+            Tela.Seguro -> Cabecalho("Seguro obrigatório", "Boleto e comprovante do mês · $hojeTexto") { tela = Tela.Inicio }
             is Tela.Checklist -> Cabecalho(t.nome, "Check-list semanal · $hojeTexto") { tela = Tela.Checklists }
         }
         FaixaMarca()
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (val t = tela) {
                 Tela.Escolher -> TelaEscolher(prefs) { Lembretes.agendar(ctx); tela = Tela.Inicio }
-                Tela.Inicio -> TelaInicio(prefs, aviso, { aviso = null; tela = Tela.Registro(it) }, { prefs.senha = ""; aviso = null; tela = Tela.Escolher }, { aviso = null; tela = Tela.Checklists })
+                Tela.Inicio -> TelaInicio(prefs, aviso, { aviso = null; tela = Tela.Registro(it) }, { prefs.senha = ""; aviso = null; tela = Tela.Escolher }, { aviso = null; tela = Tela.Checklists }, { aviso = null; tela = Tela.Seguro })
                 is Tela.Registro -> TelaRegistro(prefs, t.etapa) { msg -> aviso = msg; tela = Tela.Inicio }
                 Tela.Checklists -> TelaChecklists(prefs, aviso) { nome, itens -> aviso = null; tela = Tela.Checklist(nome, itens) }
-                Tela.Relatorio -> TelaRelatorio(prefs)
+                Tela.Relatorio -> TelaRelatorio(prefs) { aviso = null; tela = Tela.Seguro }
+                Tela.Seguro -> TelaSeguro(prefs) { msg -> aviso = msg; tela = Tela.Inicio }
                 is Tela.Checklist -> TelaChecklist(prefs, t.nome, t.itens) { msg -> aviso = msg; tela = Tela.Checklists }
             }
         }
@@ -475,7 +482,7 @@ private fun CartaoOpcao(texto: String, icone: ImageVector?, selecionado: Boolean
 // ---------------------------------------------------------------- Tela principal
 
 @Composable
-private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, aoTrocar: () -> Unit, aoChecklists: () -> Unit) {
+private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, aoTrocar: () -> Unit, aoChecklists: () -> Unit, aoSeguro: () -> Unit) {
     var hoje by remember { mutableStateOf<JSONObject?>(null) }
     var checklists by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var veiculo by remember { mutableStateOf<JSONObject?>(null) }
@@ -515,6 +522,7 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
             aplicar(r)
             prefs.ultimaConsulta = JSONObject().put("chave", chaveCache).put("r", r).toString()
             prefs.salvarOleo(veiculo?.optJSONObject("oleo"))
+            prefs.salvarSeguro(veiculo?.optJSONObject("seguro"))
             r.optJSONObject("config")?.let { c ->
                 prefs.consumoKmL = c.optDouble("consumoKmL", prefs.consumoKmL)
                 prefs.valorPadrao = c.optDouble("valorPadrao", prefs.valorPadrao)
@@ -586,6 +594,19 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
                 )
             }
             AvisosPrevistos(v)
+            // Dia 20 (ou o configurado): anexar boleto e comprovante do seguro obrigatório.
+            v.optJSONObject("seguro")?.optJSONObject("mensal")?.takeIf { it.optBoolean("pendente") }?.let { m ->
+                Card(onClick = aoSeguro, shape = CANTO_CAMPO, colors = CardDefaults.cardColors(containerColor = Cores.LARANJA_CLARO)) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Icon(Icons.Filled.Warning, contentDescription = null, tint = Cores.LARANJA)
+                        Text(
+                            "Seguro obrigatório: anexe o boleto e o comprovante de pagamento de ${m.optString("mes")}.",
+                            color = Cores.TEXTO, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f)
+                        )
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Cores.SUAVE)
+                    }
+                }
+            }
             v.optJSONObject("oleo")?.let { o -> CartaoOleo(prefs, o) { nv -> veiculo = nv } }
         }
         val pendentes = checklists.filter { !it.optBoolean("feitoNaSemana") }
@@ -984,4 +1005,88 @@ private fun mensagemRetorno(r: JSONObject, etapa: Etapa, kmEnviado: Long?, litro
     }
     r.optString("avisoKm").takeIf { it.isNotBlank() }?.let { partes += it }
     return partes.joinToString("\n")
+}
+
+// ---------------------------------------------------------------- Seguro obrigatório (mensal)
+
+/**
+ * Boleto e comprovante de pagamento do seguro obrigatório do mês: duas fotos
+ * (pela câmera ou escolhidas da galeria), enviadas juntas para a planilha.
+ */
+@Composable
+private fun TelaSeguro(prefs: Prefs, aoConcluir: (String) -> Unit) {
+    val ctx = LocalContext.current
+    val escopo = rememberCoroutineScope()
+    var boleto by remember { mutableStateOf<Foto?>(null) }
+    var comprovante by remember { mutableStateOf<Foto?>(null) }
+    var ocupado by remember { mutableStateOf(false) }
+    var erro by remember { mutableStateOf<String?>(null) }
+
+    fun receber(uri: Uri, guardar: (Foto) -> Unit) {
+        ocupado = true; erro = null
+        escopo.launch {
+            try { guardar(processar(ctx, uri, prefs, lerKm = false)) }
+            catch (e: Exception) { erro = "Erro ao abrir a imagem. Tente novamente." }
+            finally { ocupado = false }
+        }
+    }
+    val cameraBoleto = rememberCamera { u -> receber(u) { boleto = it } }
+    val cameraComprovante = rememberCamera { u -> receber(u) { comprovante = it } }
+    val galeriaBoleto = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) receber(u) { boleto = it } }
+    val galeriaComprovante = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) receber(u) { comprovante = it } }
+
+    Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Text(
+            "Todo mês, a partir do dia ${prefs.seguroDia}, anexe a foto do boleto do seguro obrigatório e a do comprovante de pagamento.",
+            color = Cores.SUAVE, fontSize = 14.sp
+        )
+        Cartao {
+            TituloSecao(1, "Boleto")
+            BlocoFoto("Fotografar o boleto", boleto, ocupado, cameraBoleto)
+            TextButton(onClick = { galeriaBoleto.launch("image/*") }, enabled = !ocupado) { Text("Escolher imagem da galeria") }
+        }
+        Cartao {
+            TituloSecao(2, "Comprovante de pagamento")
+            BlocoFoto("Fotografar o comprovante", comprovante, ocupado, cameraComprovante)
+            TextButton(onClick = { galeriaComprovante.launch("image/*") }, enabled = !ocupado) { Text("Escolher imagem da galeria") }
+        }
+        if (ocupado) LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = Cores.MAGENTA)
+        erro?.let { Erro(it) }
+        BotaoMarca(
+            if (ocupado) "Enviando..." else "Enviar boleto e comprovante",
+            onClick = {
+                val b = boleto ?: return@BotaoMarca
+                val c = comprovante ?: return@BotaoMarca
+                ocupado = true; erro = null
+                escopo.launch {
+                    var corpo: JSONObject? = null
+                    try {
+                        corpo = JSONObject()
+                            .put("senha", prefs.senha).put("tipo", "seguro_mensal")
+                            .put("tecnico", prefs.tecnico).put("placa", prefs.placa)
+                            .put("mes", SimpleDateFormat("yyyy-MM", BR).format(Date()))
+                            .put("quando", System.currentTimeMillis())
+                            .put("id", "s" + System.currentTimeMillis() + "_" + (1000..9999).random())
+                            .put("fotoBoletoBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(b.bitmap, 1600) })
+                            .put("fotoComprovanteBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(c.bitmap, 1600) })
+                        val r = Api.enviar(prefs.url, corpo)
+                        r.optJSONObject("seguroMensal")?.let { prefs.salvarSeguro(JSONObject().put("mensal", it)) }
+                        aoConcluir("Boleto e comprovante do seguro obrigatório enviados. Obrigado!")
+                    } catch (e: Api.ErroServidor) {
+                        erro = "Não foi possível enviar: ${e.message}"
+                    } catch (e: Exception) {
+                        val cp = corpo
+                        if (cp != null && Fila.guardar(ctx, cp)) {
+                            prefs.seguroMesEnviado = cp.optString("mes")
+                            aoConcluir("Sem internet agora. O boleto e o comprovante foram guardados no celular e serão enviados automaticamente quando o sinal voltar.")
+                        } else erro = "Não foi possível enviar. Verifique a internet e tente de novo."
+                    } finally { ocupado = false }
+                }
+            },
+            habilitado = !ocupado && boleto != null && comprovante != null,
+            altura = 64.dp,
+            icone = { Icon(Icons.Filled.Check, contentDescription = null, tint = Color.White) }
+        )
+        Spacer(Modifier.height(8.dp))
+    }
 }

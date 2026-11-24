@@ -154,6 +154,25 @@ internal fun CartaoChecagem(prefs: Prefs, hoje: JSONObject, aoEnviar: () -> Unit
     }
 }
 
+/**
+ * Seguro obrigatório do mês: a partir do dia configurado (padrão 20) o técnico anexa
+ * a foto do boleto e a do comprovante de pagamento.
+ */
+@Composable
+internal fun SeguroMensal(m: JSONObject?, aoAnexar: () -> Unit) {
+    if (m == null) return
+    HorizontalDivider(color = Cores.LINHA)
+    Text("Boleto e comprovante de ${m.optString("mes")}", fontWeight = FontWeight.Bold)
+    when {
+        m.optBoolean("enviado") -> Aviso("Enviados em ${m.optString("enviadoEm")}.", Cores.VERDE_CLARO, Cores.VERDE, Icons.Filled.CheckCircle)
+        m.optBoolean("pendente") -> Aviso("Pendente: anexe o boleto e o comprovante de pagamento deste mês.", Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning)
+        else -> Text("Todo dia ${m.optInt("dia", 20)}: anexar o boleto e o comprovante de pagamento. Próximo: ${m.optString("dataLembrete")}.", color = Cores.SUAVE, fontSize = 14.sp)
+    }
+    OutlinedButton(onClick = aoAnexar, shape = CANTO_CAMPO, modifier = Modifier.fillMaxWidth()) {
+        Text(if (m.optBoolean("enviado")) "Anexar de novo" else "Anexar boleto e comprovante")
+    }
+}
+
 /** Aviso do seguro obrigatório na tela inicial. */
 @Composable
 internal fun AvisosPrevistos(veiculo: JSONObject) {
@@ -461,7 +480,7 @@ internal fun TelaChecklist(prefs: Prefs, nome: String, itens: List<String>, aoCo
 // ---------------------------------------------------------------- Relatório
 
 @Composable
-internal fun TelaRelatorio(prefs: Prefs) {
+internal fun TelaRelatorio(prefs: Prefs, aoSeguro: () -> Unit) {
     val escopo = rememberCoroutineScope()
     var rel by remember { mutableStateOf<JSONObject?>(null) }
     var erro by remember { mutableStateOf<String?>(null) }
@@ -600,6 +619,7 @@ internal fun TelaRelatorio(prefs: Prefs) {
                     Text("Vencimento: ${seguro.optString("vencimento")}", color = Cores.SUAVE)
                 }
             }
+            SeguroMensal(seguro.optJSONObject("mensal"), aoSeguro)
         }
 
         // Histórico de abastecimentos
