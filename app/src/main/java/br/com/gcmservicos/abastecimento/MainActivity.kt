@@ -88,11 +88,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** As três etapas do dia. */
-private enum class Etapa(val numero: Int, val titulo: String, val botao: String, val descricao: String) {
+/**
+ * Registros do dia. O turno tem duas etapas (início e fim); o abastecimento é feito
+ * a qualquer hora, quando o técnico colocar combustível, e NÃO encerra o turno:
+ * ele só reinicia a contagem de autonomia a partir do km do abastecimento.
+ */
+private enum class Etapa(val numero: Int?, val titulo: String, val botao: String, val descricao: String) {
     INICIO(1, "Início do turno", "OK", "8h · foto do painel e km"),
-    ABASTECIMENTO(2, "Abastecimento", "Enviar abastecimento", "Nota fiscal, valor, litros e km"),
-    FIM(3, "Fim do turno", "Encerrar turno", "17h · foto do painel e km"),
+    ABASTECIMENTO(null, "Abastecimento", "Enviar abastecimento", "Quando colocar combustível · não encerra o turno"),
+    FIM(2, "Fim do turno", "Encerrar turno", "17h · foto do painel e km"),
 }
 
 private sealed interface Tela {
@@ -143,7 +147,8 @@ private fun App(pedido: MutableState<String?>) {
         when (val t = tela) {
             Tela.Escolher -> Cabecalho("Combustível GCM", "Entrar", if (podeVoltar) ({ tela = Tela.Inicio }) else null)
             Tela.Inicio -> Cabecalho("Olá, ${prefs.tecnico.substringBefore(' ')}", "Veículo ${prefs.placa} · $hojeTexto", null)
-            is Tela.Registro -> Cabecalho(t.etapa.titulo, "Etapa ${t.etapa.numero} de 3 · $hojeTexto") { tela = Tela.Inicio }
+            is Tela.Registro -> Cabecalho(t.etapa.titulo,
+                (t.etapa.numero?.let { "Turno · etapa $it de 2" } ?: "A qualquer hora · o turno continua aberto") + " · $hojeTexto") { tela = Tela.Inicio }
             Tela.Checklists -> Cabecalho("Check-lists", "Segurança do veículo, ferramental e EPI", null)
             Tela.Relatorio -> Cabecalho("Relatório", "Veículo ${prefs.placa}", null)
             is Tela.Checklist -> Cabecalho(t.nome, "Check-list semanal · $hojeTexto") { tela = Tela.Checklists }
@@ -571,6 +576,15 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
                 "Abastecer" -> Aviso("Abasteça o veículo: restam ${km(v.opt("kmRestantes"))}.", Cores.VERMELHO_CLARO, Cores.VERMELHO, Icons.Filled.Warning)
                 "OK" -> Aviso("Tanque: restam cerca de ${km(v.opt("kmRestantes"))}.", Cores.VERDE_CLARO, Cores.VERDE, Icons.Filled.CheckCircle)
             }
+            // A autonomia conta a partir do km do último abastecimento.
+            val kmAbast = v.optDouble("kmUltimoAbastecimento", 0.0)
+            if (kmAbast > 0 && v.optString("situacao") != "Sem abastecimento registrado") {
+                Text(
+                    "Autonomia contada desde o abastecimento em ${km(kmAbast)}: rodados ${km(v.opt("kmRodadosDesdeAbastecimento"))} de ${km(v.opt("kmCoube"))}.",
+                    color = Cores.SUAVE, fontSize = 13.sp,
+                    modifier = Modifier.fillMaxWidth().background(Cores.FUNDO, CANTO_CAMPO).padding(10.dp)
+                )
+            }
             AvisosPrevistos(v)
             v.optJSONObject("oleo")?.let { o -> CartaoOleo(prefs, o) { nv -> veiculo = nv } }
         }
@@ -588,11 +602,14 @@ private fun TelaInicio(prefs: Prefs, aviso: String?, aoAbrir: (Etapa) -> Unit, a
             }
         }
 
-        Text("Etapas do dia", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
+        Text("Turno de hoje", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
         val h = hoje
         CartaoEtapa(Etapa.INICIO, rememberVectorPainterIcon(Icons.Filled.PlayArrow), h?.optBoolean("inicioFeito") == true) { aoAbrir(Etapa.INICIO) }
-        CartaoEtapa(Etapa.ABASTECIMENTO, painterResource(R.drawable.ic_notificacao), h?.optBoolean("abastecimentoFeito") == true) { aoAbrir(Etapa.ABASTECIMENTO) }
         CartaoEtapa(Etapa.FIM, rememberVectorPainterIcon(Icons.AutoMirrored.Filled.ExitToApp), h?.optBoolean("fimFeito") == true) { aoAbrir(Etapa.FIM) }
+
+        Text("Combustível", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 4.dp))
+        CartaoEtapa(Etapa.ABASTECIMENTO, painterResource(R.drawable.ic_notificacao), h?.optBoolean("abastecimentoFeito") == true,
+            textoFeito = "Registrado hoje · toque para registrar outro") { aoAbrir(Etapa.ABASTECIMENTO) }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(onClick = { atualizar++ }, shape = CANTO_CAMPO) {
@@ -620,7 +637,8 @@ internal fun Indicador(rotulo: String, valor: String, cor: Color, modifier: Modi
 }
 
 @Composable
-private fun CartaoEtapa(etapa: Etapa, icone: androidx.compose.ui.graphics.painter.Painter, feito: Boolean, aoClicar: () -> Unit) {
+private fun CartaoEtapa(etapa: Etapa, icone: androidx.compose.ui.graphics.painter.Painter, feito: Boolean,
+                        textoFeito: String = "Concluído hoje", aoClicar: () -> Unit) {
     Card(
         onClick = aoClicar, shape = CANTO, modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = if (feito) Cores.VERDE_CLARO else Color.White),
@@ -635,8 +653,8 @@ private fun CartaoEtapa(etapa: Etapa, icone: androidx.compose.ui.graphics.painte
                 else Icon(icone, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
             }
             Column(Modifier.weight(1f)) {
-                Text("${etapa.numero}. ${etapa.titulo}", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                Text(if (feito) "Concluído hoje" else etapa.descricao, color = if (feito) Cores.VERDE else Cores.SUAVE, fontSize = 14.sp)
+                Text((etapa.numero?.let { "$it. " } ?: "") + etapa.titulo, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text(if (feito) textoFeito else etapa.descricao, color = if (feito) Cores.VERDE else Cores.SUAVE, fontSize = 14.sp)
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Cores.SUAVE)
         }
@@ -730,6 +748,7 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
     var kmTexto by remember { mutableStateOf("") }
     var ocupado by remember { mutableStateOf(false) }
     var erro by remember { mutableStateOf<String?>(null) }
+    var confirmando by remember { mutableStateOf(false) }
 
     val cameraNota = rememberCamera { uri ->
         ocupado = true; erro = null
@@ -768,6 +787,53 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
     val pronto = aceita(fotoPainel, tentativasPainel) && kmDigitado != null && kmDigitado > 0 &&
         (etapa != Etapa.ABASTECIMENTO ||
             (aceita(fotoNota, tentativasNota) && litrosNum != null && litrosNum > 0 && valorNum != null && valorNum > 0))
+
+    /** Envia o registro já confirmado pelo técnico (ou guarda no celular, sem internet). */
+    fun enviar() {
+        val painel = fotoPainel ?: return
+        ocupado = true; erro = null
+        escopo.launch {
+            var corpo: JSONObject? = null
+            try {
+                corpo = JSONObject()
+                    .put("senha", prefs.senha)
+                    .put("tecnico", prefs.tecnico).put("placa", prefs.placa)
+                    .put("km", kmDigitado)
+                    .put("quando", System.currentTimeMillis())
+                    .put("id", "a" + System.currentTimeMillis() + "_" + (1000..9999).random())
+                    .put("origem", when {
+                        painel.kmLido == null -> "Digitado"
+                        painel.kmLido == kmDigitado -> "Lido da foto (confirmado pelo técnico)"
+                        else -> "Corrigido pelo técnico (foto: ${painel.kmLido})"
+                    })
+                if (etapa == Etapa.ABASTECIMENTO) {
+                    val l = litrosNum ?: 0.0
+                    corpo.put("tipo", "abastecimento")
+                        .put("valor", valorNum ?: 0.0)
+                        .put("litros", l)
+                        .put("kmCoube", Math.round(l * prefs.consumoKmL))
+                        .put("fotoBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(fotoNota!!.bitmap, 1600) })
+                        .put("fotoPainelBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(painel.bitmap) })
+                } else {
+                    corpo.put("tipo", "leitura")
+                        .put("periodo", if (etapa == Etapa.INICIO) Lembretes.INICIO else Lembretes.FIM)
+                        .put("fotoBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(painel.bitmap) })
+                }
+                val r = Api.enviar(prefs.url, corpo)
+                if (kmDigitado != null && kmDigitado > prefs.ultimoKm) prefs.ultimoKm = kmDigitado
+                aoConcluir(mensagemRetorno(r, etapa, kmDigitado, litrosNum, prefs))
+            } catch (e: Api.ErroServidor) {
+                erro = "Não foi possível enviar: ${e.message}"
+            } catch (e: Exception) {
+                // Sem internet: guarda no celular e envia sozinho quando o sinal voltar.
+                val c = corpo
+                if (c != null && Fila.guardar(ctx, c)) {
+                    if (kmDigitado != null && kmDigitado > prefs.ultimoKm) prefs.ultimoKm = kmDigitado
+                    aoConcluir("Sem internet agora. O registro foi guardado no celular e será enviado automaticamente quando o sinal voltar.")
+                } else erro = "Não foi possível enviar. Verifique a internet e tente de novo."
+            } finally { ocupado = false }
+        }
+    }
 
     Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         if (etapa == Etapa.ABASTECIMENTO) {
@@ -810,76 +876,112 @@ private fun TelaRegistro(prefs: Prefs, etapa: Etapa, aoConcluir: (String) -> Uni
 
         BotaoMarca(
             if (ocupado) "Enviando..." else etapa.botao,
-            onClick = {
-                val painel = fotoPainel ?: return@BotaoMarca
-                ocupado = true; erro = null
-                escopo.launch {
-                    var corpo: JSONObject? = null
-                    try {
-                        corpo = JSONObject()
-                            .put("senha", prefs.senha)
-                            .put("tecnico", prefs.tecnico).put("placa", prefs.placa)
-                            .put("km", kmDigitado)
-                            .put("quando", System.currentTimeMillis())
-                            .put("id", "a" + System.currentTimeMillis() + "_" + (1000..9999).random())
-                            .put("origem", when {
-                                painel.kmLido == null -> "Digitado"
-                                painel.kmLido == kmDigitado -> "Lido da foto (confirmado pelo técnico)"
-                                else -> "Corrigido pelo técnico (foto: ${painel.kmLido})"
-                            })
-                        if (etapa == Etapa.ABASTECIMENTO) {
-                            val l = litrosNum ?: 0.0
-                            corpo.put("tipo", "abastecimento")
-                                .put("valor", valorNum ?: 0.0)
-                                .put("litros", l)
-                                .put("kmCoube", Math.round(l * prefs.consumoKmL))
-                                .put("fotoBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(fotoNota!!.bitmap, 1600) })
-                                .put("fotoPainelBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(painel.bitmap) })
-                        } else {
-                            corpo.put("tipo", "leitura")
-                                .put("periodo", if (etapa == Etapa.INICIO) Lembretes.INICIO else Lembretes.FIM)
-                                .put("fotoBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(painel.bitmap) })
-                        }
-                        val r = Api.enviar(prefs.url, corpo)
-                        if (kmDigitado != null && kmDigitado > prefs.ultimoKm) prefs.ultimoKm = kmDigitado
-                        aoConcluir(mensagemRetorno(r, etapa, prefs))
-                    } catch (e: Api.ErroServidor) {
-                        erro = "Não foi possível enviar: ${e.message}"
-                    } catch (e: Exception) {
-                        // Sem internet: guarda no celular e envia sozinho quando o sinal voltar.
-                        val c = corpo
-                        if (c != null && Fila.guardar(ctx, c)) {
-                            if (kmDigitado != null && kmDigitado > prefs.ultimoKm) prefs.ultimoKm = kmDigitado
-                            aoConcluir("Sem internet agora. O registro foi guardado no celular e será enviado automaticamente quando o sinal voltar.")
-                        } else erro = "Não foi possível enviar. Verifique a internet e tente de novo."
-                    } finally { ocupado = false }
-                }
-            },
+            onClick = { if (pronto) confirmando = true },
             habilitado = !ocupado && pronto,
             altura = 64.dp,
             icone = { Icon(Icons.Filled.Check, contentDescription = null, tint = Color.White) }
         )
         Spacer(Modifier.height(8.dp))
     }
+
+    if (confirmando && kmDigitado != null) {
+        DialogoConfirmarKm(
+            etapa, kmDigitado, prefs.ultimoKm, fotoPainel?.kmLido,
+            litrosNum.takeIf { etapa == Etapa.ABASTECIMENTO }, valorNum.takeIf { etapa == Etapa.ABASTECIMENTO }, prefs.consumoKmL,
+            aoCorrigir = { confirmando = false },
+            aoConfirmar = { confirmando = false; enviar() }
+        )
+    }
 }
 
-private fun mensagemRetorno(r: JSONObject, etapa: Etapa, prefs: Prefs): String {
+/**
+ * Confirmação antes de enviar: mostra o km digitado em destaque para o técnico conferir
+ * com o painel, compara com o último km registrado e, no fim do turno, lembra que o
+ * abastecimento não encerra o dia.
+ */
+@Composable
+private fun DialogoConfirmarKm(
+    etapa: Etapa, kmDigitado: Long, ultimoKm: Long, kmLido: Long?, litros: Double?, valor: Double?, consumo: Double,
+    aoCorrigir: () -> Unit, aoConfirmar: () -> Unit,
+) {
+    val diferenca = if (ultimoKm > 0) kmDigitado - ultimoKm else null
+    val suspeito = diferenca != null && (diferenca < 0 || diferenca > LIMITE_KM_SALTO)
+    AlertDialog(
+        onDismissRequest = aoCorrigir,
+        title = { Text("Confira o km antes de enviar", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("O km digitado é:", color = Cores.SUAVE)
+                Text(
+                    km(kmDigitado), fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Cores.MARINHO, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().background(Cores.FUNDO, CANTO_CAMPO).padding(vertical = 12.dp)
+                )
+                Text("É exatamente o número que aparece no painel do veículo?", fontWeight = FontWeight.Medium)
+                if (diferenca != null) {
+                    Text("Último km registrado: ${km(ultimoKm)} (diferença de ${if (diferenca >= 0) "+" else ""}${km(diferenca)})", color = Cores.SUAVE, fontSize = 14.sp)
+                }
+                if (kmLido != null && abs(kmLido - kmDigitado) > 2) {
+                    Text("Na foto parece estar ${km(kmLido)}.", color = Cores.LARANJA, fontSize = 14.sp)
+                }
+                if (suspeito) {
+                    Erro(
+                        if (diferenca!! < 0) "Este km é MENOR que o último registro. Confira o painel: um km errado atrapalha a contagem de autonomia."
+                        else "Este km está mais de ${km(LIMITE_KM_SALTO)} acima do último registro. Confira se não há um dígito a mais."
+                    )
+                }
+                if (etapa == Etapa.ABASTECIMENTO && litros != null) {
+                    Text(
+                        "Litros: ${dec(litros)}" + (valor?.let { " · Valor: ${reais(it)}" } ?: "") +
+                            "\nA partir deste km o tanque rende cerca de ${km(litros * consumo)}. O turno continua aberto.",
+                        color = Cores.AZUL, fontSize = 14.sp
+                    )
+                }
+                if (etapa == Etapa.FIM) {
+                    val hora = SimpleDateFormat("HH", BR).format(Date()).toInt()
+                    Aviso(
+                        if (hora < 15) "Atenção: você vai ENCERRAR o turno de hoje e ainda são ${SimpleDateFormat("HH:mm", BR).format(Date())}. " +
+                            "Para registrar combustível use \"Abastecimento\", que não encerra o turno."
+                        else "Você vai encerrar o turno de hoje.",
+                        Cores.LARANJA_CLARO, Cores.LARANJA, Icons.Filled.Warning
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = aoConfirmar) {
+                Text(if (etapa == Etapa.FIM) "Confirmar e encerrar" else "Confirmar e enviar", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = { TextButton(onClick = aoCorrigir) { Text("Corrigir") } }
+    )
+}
+
+/** Salto de km acima do qual a confirmação avisa que o número pode estar errado. */
+private const val LIMITE_KM_SALTO = 1000L
+
+private fun mensagemRetorno(r: JSONObject, etapa: Etapa, kmEnviado: Long?, litros: Double?, prefs: Prefs): String {
     val partes = mutableListOf(
         when (etapa) {
             Etapa.INICIO -> "Início do turno registrado. Bom trabalho!"
-            Etapa.ABASTECIMENTO -> "Abastecimento registrado."
+            Etapa.ABASTECIMENTO -> "Abastecimento registrado. Seu turno continua aberto: encerre apenas no fim do dia."
             Etapa.FIM -> "Turno encerrado."
         }
     )
-    r.optJSONObject("hoje")?.let { h ->
-        if (etapa == Etapa.FIM || h.optDouble("kmRodados", 0.0) > 0) {
-            partes += "Hoje você rodou ${km(h.opt("kmRodados"))} e gastou ${reais(h.optDouble("gasto", 0.0))} de combustível."
+    val s = r.optJSONObject("situacao")
+    if (etapa == Etapa.ABASTECIMENTO) {
+        // A partir de agora a autonomia conta do km deste abastecimento.
+        val rende = litros?.let { it * prefs.consumoKmL }
+        if (kmEnviado != null && rende != null) partes += "A autonomia agora conta a partir de ${km(kmEnviado)}: o tanque rende cerca de ${km(rende)}."
+    } else {
+        r.optJSONObject("hoje")?.let { h ->
+            if (etapa == Etapa.FIM || h.optDouble("kmRodados", 0.0) > 0) {
+                partes += "Hoje você rodou ${km(h.opt("kmRodados"))} e gastou ${reais(h.optDouble("gasto", 0.0))} de combustível."
+            }
+        }
+        if (s != null && s.optString("situacao") == "Abastecer") {
+            partes += "Atenção: o veículo precisa ser abastecido (restam ${km(s.opt("kmRestantes"))}). O responsável foi avisado."
         }
     }
     r.optString("avisoKm").takeIf { it.isNotBlank() }?.let { partes += it }
-    val s = r.optJSONObject("situacao")
-    if (s != null && s.optString("situacao") == "Abastecer") {
-        partes += "Atenção: o veículo precisa ser abastecido (restam ${km(s.opt("kmRestantes"))}). O responsável foi avisado."
-    }
     return partes.joinToString("\n")
 }

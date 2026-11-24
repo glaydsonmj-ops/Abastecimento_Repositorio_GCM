@@ -125,6 +125,9 @@ function veiculoJson_(r, cfg) {
   const m = manutencaoPrevista_(r, cfg);
   return { placa: r[V.PLACA], modelo: r[V.MODELO], ano: r[V.ANO], cor: r[V.COR], kmAtual: r[V.KM_ATUAL],
            kmRestantes: r[V.KM_RESTANTES], situacao: r[V.SITUACAO],
+           // A autonomia conta a partir do km do último abastecimento (o abastecimento não encerra o turno).
+           kmUltimoAbastecimento: Number(r[V.KM_ULT_ABAST]) || 0, kmCoube: Number(r[V.KM_COUBE]) || 0,
+           kmRodadosDesdeAbastecimento: Number(r[V.KM_RODADOS]) || 0,
            emManutencao: String(r[V.MANUTENCAO]).toLowerCase() === 'sim', oleo: m.oleo, seguro: m.seguro };
 }
 
@@ -1446,6 +1449,8 @@ function appTecnico_() {
     if (v) {
       if (v.situacao === 'Abastecer') x += '<div class="aviso erro">⛽ Abasteça o veículo: restam ' + km(v.kmRestantes) + '.</div>';
       else if (v.situacao === 'OK') x += '<div class="aviso ok">⛽ Tanque: restam cerca de ' + km(v.kmRestantes) + '.</div>';
+      if (v.kmUltimoAbastecimento > 0 && v.situacao !== 'Sem abastecimento registrado') x += '<p class="sub">Autonomia contada desde o abastecimento em ' +
+        km(v.kmUltimoAbastecimento) + ': rodados ' + km(v.kmRodadosDesdeAbastecimento) + ' de ' + km(v.kmCoube) + '.</p>';
       const s = v.seguro || {};
       if (s.situacao === 'Vencido') x += '<div class="aviso erro">Seguro obrigatório vencido em ' + E(s.vencimento) + '.</div>';
       else if (s.situacao === 'Vence em breve') x += '<div class="aviso atencao">Seguro obrigatório vence em ' + E(s.vencimento) + ' (' + s.diasRestantes + ' dias).</div>';
@@ -1459,13 +1464,13 @@ function appTecnico_() {
     }
     const pend = (estado.r.checklists || []).filter(c => !c.feitoNaSemana);
     if (pend.length) x += '<div class="aviso atencao">📋 Check-list da semana pendente: ' + E(pend.map(c => c.nome).join(' e ')) + '.</div>';
-    x += '<h2 style="margin:6px 0 0;font-size:18px">Etapas do dia</h2>';
+    // Turno: início (1) e fim (2). O abastecimento fica à parte: é feito a qualquer hora e não encerra o turno.
     const feitos = [h.inicioFeito, h.abastecimentoFeito, h.fimFeito];
-    const desc = ['8h · foto do painel e km', 'Nota fiscal, valor, litros e km', '17h · foto do painel e km'];
-    DIAS.forEach((d, i) => {
-      x += '<button class="etapa' + (feitos[i] ? ' feito' : '') + '" data-acao="etapa" data-i="' + i + '"><div class="bola">' + (feitos[i] ? '✓' : (i + 1)) +
-        '</div><div><b>' + (i + 1) + '. ' + d + '</b><span>' + (feitos[i] ? 'Concluído hoje' : desc[i]) + '</span></div></button>';
-    });
+    const desc = ['8h · foto do painel e km', 'Quando colocar combustível · não encerra o turno', '17h · foto do painel e km'];
+    const botaoEtapa = (i, n) => '<button class="etapa' + (feitos[i] ? ' feito' : '') + '" data-acao="etapa" data-i="' + i + '"><div class="bola">' + (feitos[i] ? '✓' : (n || '⛽')) +
+      '</div><div><b>' + (n ? n + '. ' : '') + DIAS[i] + '</b><span>' + (feitos[i] ? (i === 1 ? 'Registrado hoje · toque para registrar outro' : 'Concluído hoje') : desc[i]) + '</span></div></button>';
+    x += '<h2 style="margin:6px 0 0;font-size:18px">Turno de hoje</h2>' + botaoEtapa(0, 1) + botaoEtapa(2, 2);
+    x += '<h2 style="margin:6px 0 0;font-size:18px">Combustível</h2>' + botaoEtapa(1, 0);
     x += '<h2 style="margin:6px 0 0;font-size:18px">Check-lists da semana</h2>';
     (estado.r.checklists || []).forEach((c, i) => {
       x += '<button class="etapa' + (c.feitoNaSemana ? ' feito' : '') + '" data-acao="checklist" data-i="' + i + '"><div class="bola">' + (c.feitoNaSemana ? '✓' : '📋') +
@@ -1530,7 +1535,8 @@ function appTecnico_() {
   }
 
   function telaRegistro(i) {
-    estado = { etapa: i, fotos: {}, valor: String((estado.r && estado.r.config && estado.r.config.valorPadrao) || 180).replace('.', ','), litros: '', km: '' };
+    estado = { etapa: i, fotos: {}, valor: String((estado.r && estado.r.config && estado.r.config.valorPadrao) || 180).replace('.', ','), litros: '', km: '',
+      r: estado.r, veiculo: estado.veiculo };
     desenharRegistro();
   }
   ac.etapa = b => telaRegistro(Number(b.dataset.i));
@@ -1549,8 +1555,8 @@ function appTecnico_() {
     if (s.fotos.painel) x += '<label for="km">Digite o km que aparece no painel</label><input id="km" inputmode="numeric" pattern="[0-9]*" value="' + E(s.km) + '">';
     x += '</div>';
     if (erro) x += '<div class="aviso erro">' + E(erro) + '</div>';
-    x += '<button class="btn" data-acao="enviarRegistro" style="padding:20px">✓ ' + ['OK', 'Enviar abastecimento', 'Encerrar turno'][s.etapa] + '</button>';
-    tela(DIAS[s.etapa], 'Etapa ' + (s.etapa + 1) + ' de 3 · ' + hojeBr(), x, true);
+    x += '<button class="btn" data-acao="conferirRegistro" style="padding:20px">✓ ' + ['OK', 'Enviar abastecimento', 'Encerrar turno'][s.etapa] + '</button>';
+    tela(DIAS[s.etapa], (abast ? 'A qualquer hora · o turno continua aberto' : 'Turno · etapa ' + (s.etapa === 0 ? 1 : 2) + ' de 2') + ' · ' + hojeBr(), x, true);
   }
   function guardarCampos() {
     ['valor', 'litros', 'km'].forEach(k => { const el = document.getElementById(k); if (el) estado[k] = el.value; });
@@ -1563,8 +1569,42 @@ function appTecnico_() {
       .then(d => { estado.fotos[el.dataset.foto] = d; desenharRegistro(); })
       .catch(e => desenharRegistro(e.message));
   });
-  ac.enviarRegistro = b => {
+  /** Confere os campos e mostra o km em destaque para o técnico confirmar antes de enviar. */
+  ac.conferirRegistro = () => {
     guardarCampos();
+    const s = estado; const abast = s.etapa === 1;
+    const kmN = parseInt(String(s.km).replace(/[^0-9]/g, ''), 10);
+    if (abast && !s.fotos.nota) return desenharRegistro('Fotografe a nota fiscal.');
+    if (!s.fotos.painel) return desenharRegistro('Fotografe o painel.');
+    if (!(kmN > 0)) return desenharRegistro('Digite o km do painel.');
+    if (abast && !(num(s.valor) > 0)) return desenharRegistro('Digite o valor colocado.');
+    if (abast && !(num(s.litros) > 0)) return desenharRegistro('Digite os litros que couberam no tanque.');
+    const ultimo = Number(s.veiculo && s.veiculo.kmAtual) || 0;
+    const dif = ultimo > 0 ? kmN - ultimo : null;
+    let x = '<div class="cartao"><h2>Confira o km antes de enviar</h2><p class="sub">O km digitado é:</p>' +
+      '<div style="font-size:34px;font-weight:800;text-align:center;padding:12px;border-radius:12px;background:var(--fundo,#F3F5F9);color:#052545">' + km(kmN) + '</div>' +
+      '<p><b>É exatamente o número que aparece no painel do veículo?</b></p>';
+    if (dif !== null) x += '<p class="sub">Último km registrado: ' + km(ultimo) + ' (diferença de ' + (dif >= 0 ? '+' : '') + km(dif) + ')</p>';
+    if (dif !== null && dif < 0) x += '<div class="aviso erro">Este km é MENOR que o último registro. Confira o painel: um km errado atrapalha a contagem de autonomia.</div>';
+    else if (dif !== null && dif > 1000) x += '<div class="aviso erro">Este km está mais de 1.000 km acima do último registro. Confira se não há um dígito a mais.</div>';
+    if (abast) {
+      const consumo = (s.r && s.r.config && s.r.config.consumoKmL) || 10;
+      x += '<p class="sub">Litros: ' + num(s.litros).toLocaleString('pt-BR') + ' · Valor: ' + reais(num(s.valor)) + '<br>A partir deste km o tanque rende cerca de ' +
+        km(Math.round(num(s.litros) * consumo)) + '. O turno continua aberto.</p>';
+    }
+    if (s.etapa === 2) {
+      const agora = new Date();
+      x += agora.getHours() < 15
+        ? '<div class="aviso atencao">Atenção: você vai ENCERRAR o turno de hoje e ainda são ' + agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) +
+          '. Para registrar combustível use "Abastecimento", que não encerra o turno.</div>'
+        : '<div class="aviso atencao">Você vai encerrar o turno de hoje.</div>';
+    }
+    x += '<div class="linha"><button class="btn contorno" data-acao="corrigirKm">Corrigir</button><button class="btn" data-acao="enviarRegistro">' +
+      (s.etapa === 2 ? 'Confirmar e encerrar' : 'Confirmar e enviar') + '</button></div></div>';
+    tela('Confirmar', DIAS[s.etapa] + ' · ' + hojeBr(), x, true);
+  };
+  ac.corrigirKm = () => desenharRegistro();
+  ac.enviarRegistro = b => {
     const s = estado; const abast = s.etapa === 1;
     const kmN = parseInt(String(s.km).replace(/[^0-9]/g, ''), 10);
     if (abast && !s.fotos.nota) return desenharRegistro('Fotografe a nota fiscal.');
@@ -1583,9 +1623,12 @@ function appTecnico_() {
     }
     b.disabled = true; b.textContent = 'Enviando...';
     chamar('webRegistrar', corpo).then(r => {
-      const partes = [['Início do turno registrado. Bom trabalho!', 'Abastecimento registrado.', 'Turno encerrado.'][s.etapa]];
-      if (r.hoje && (s.etapa === 2 || r.hoje.kmRodados > 0)) partes.push('Hoje você rodou ' + km(r.hoje.kmRodados) + ' e gastou ' + reais(r.hoje.gasto) + ' de combustível.');
-      if (r.situacao && r.situacao.situacao === 'Abastecer') partes.push('Atenção: o veículo precisa ser abastecido (restam ' + km(r.situacao.kmRestantes) + '). O responsável foi avisado.');
+      const partes = [['Início do turno registrado. Bom trabalho!', 'Abastecimento registrado. Seu turno continua aberto: encerre apenas no fim do dia.', 'Turno encerrado.'][s.etapa]];
+      if (abast) partes.push('A autonomia agora conta a partir de ' + km(kmN) + ': o tanque rende cerca de ' + km(corpo.kmCoube) + '.');
+      else {
+        if (r.hoje && (s.etapa === 2 || r.hoje.kmRodados > 0)) partes.push('Hoje você rodou ' + km(r.hoje.kmRodados) + ' e gastou ' + reais(r.hoje.gasto) + ' de combustível.');
+        if (r.situacao && r.situacao.situacao === 'Abastecer') partes.push('Atenção: o veículo precisa ser abastecido (restam ' + km(r.situacao.kmRestantes) + '). O responsável foi avisado.');
+      }
       if (r.avisoKm) partes.push(r.avisoKm);
       telaInicio(partes.join('\n'));
     }).catch(e => {
