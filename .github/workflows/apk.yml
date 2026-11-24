@@ -58,3 +58,19 @@ jobs:
           files: abastecimento-gcm.apk
           body: |
             Para instalar, baixe o arquivo abastecimento-gcm.apk no celular e abra-o.
+
+      # APK de teste de um PR: versão de pré-lançamento separada, que NÃO vira a "latest"
+      # (os celulares dos técnicos continuam recebendo só a versão publicada na main).
+      - name: Publicar APK de teste do PR
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: teste-pr-${{ github.event.pull_request.number }}
+          name: Teste do PR ${{ github.event.pull_request.number }} (não usar em produção)
+          target_commitish: ${{ github.event.pull_request.head.sha }}
+          prerelease: true
+          make_latest: false
+          files: abastecimento-gcm.apk
+          body: |
+            Versão de TESTE do PR #${{ github.event.pull_request.number }}. Não é a versão dos técnicos.
+            Para instalar, baixe o arquivo abastecimento-gcm.apk no celular e abra-o.
