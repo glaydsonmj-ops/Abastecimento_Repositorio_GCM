@@ -26,6 +26,7 @@ const ABA = {
   ITENS: 'Itens dos check-lists',
   CHECKLISTS: 'Check-lists',
   SEGURO_MENSAL: 'Seguro mensal',
+  FILA_EMAILS: 'Fila de e-mails',
 };
 const CHECKLISTS = ['Segurança do veículo', 'Ferramental e EPI'];
 const TZ = 'America/Sao_Paulo';
@@ -52,7 +53,13 @@ function doGet(e) {
 
 /** Consulta usada pelo app Android (GET) e pela versão web (iPhone). */
 function consultar_(p) {
-  return comMemo_(() => consultarDados_(p));
+  const r = comMemo_(() => consultarDados_(p));
+  // Resumo diário de e-mails também sai quando os técnicos só consultam o app.
+  const lock = LockService.getScriptLock();
+  if (lock.tryLock(3000)) {
+    try { resumoEmailsSeDevido_(); } catch (err) { console.error(err); } finally { lock.releaseLock(); }
+  }
+  return r;
 }
 function consultarDados_(p) {
   // Os nomes dos técnicos não são mais divulgados (cada técnico só vê os próprios dados).
@@ -224,6 +231,7 @@ function registrar_(d) {
     const resp = registrarTipo_(d, t, ss, agora, cfg);
     if (idReg && resp && resp.ok) cache.put(idReg, '1', 21600);
     try { relatorioMensalSeDevido_(); } catch (err) { console.error(err); }
+    try { resumoEmailsSeDevido_(); } catch (err) { console.error(err); }
     return resp;
   } catch (err) {
     return { ok: false, erro: String(err) };
@@ -263,10 +271,8 @@ function registrarTipo_(d, t, ss, agora, cfg) {
       aba.getRange(aba.getLastRow() + 1, 1, linhas.length, 7).setValues(linhas);
       const problemas = itens.filter(i => i.condicao && i.condicao !== 'OK');
       if (problemas.length && cfg.email) {
-        MailApp.sendEmail(cfg.email, `Check-list ${nome}: ${problemas.length} item(ns) com problema (${d.tecnico})`,
-          `Prezado Glaydson,\n\nO técnico ${d.tecnico} (veículo ${d.placa}) preencheu o check-list "${nome}" e apontou:\n\n` +
-          problemas.map(i => `- ${i.item}: ${i.condicao}${i.observacao ? ' (' + i.observacao + ')' : ''}`).join('\n') +
-          `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+        avisar_('Check-list', d.tecnico, d.placa, agora, `Check-list "${nome}": ${problemas.length} item(ns) com problema`,
+          problemas.map(i => `${i.item}: ${i.condicao}${i.observacao ? ' (' + i.observacao + ')' : ''}`).join('; '));
         ss.getSheetByName(ABA.ALERTAS).appendRow([agora, d.placa, d.tecnico, nome, cfg.email, 'Check-list']);
       }
       SpreadsheetApp.flush();
@@ -282,24 +288,22 @@ function registrarTipo_(d, t, ss, agora, cfg) {
       ss.getSheetByName(ABA.VEICULOS).getRange(linha, V.OLEO_AGENDADA + 1).setValue(data);
       SpreadsheetApp.flush();
       if (cfg.email) {
-        MailApp.sendEmail(cfg.email, `Troca de óleo agendada: ${d.placa} em ${dataBr_(data)}`,
-          `Prezado Glaydson,\n\nO técnico ${d.tecnico} agendou a troca de óleo do veículo ${d.placa} para ${dataBr_(data)}.\n\n` +
-          `Atenciosamente,\nControle de Abastecimento GCM Serviços`);
+        avisar_('Óleo', d.tecnico, d.placa, agora, `Troca de óleo agendada para ${dataBr_(data)}`, '');
       }
       const r = linhas_(ss.getSheetByName(ABA.VEICULOS)).find(l => l[V.PLACA] === d.placa);
       return { ok: true, veiculo: veiculoJson_(r, cfg) };
     }
 
     if (d.tipo === 'seguro_mensal') {
-      if (!d.fotoBoletoBase64 || !d.fotoComprovanteBase64) return { ok: false, erro: 'Anexe a foto do boleto e a do comprovante de pagamento.' };
+      if (!d.fotoBoletoBase64 || !d.fotoComprovanteBase64) return { ok: false, erro: 'Anexe o boleto e o comprovante de pagamento (foto ou PDF).' };
       const mesIso = /^\d{4}-\d{2}$/.test(String(d.mes || '')) ? String(d.mes) : Utilities.formatDate(agora, TZ, 'yyyy-MM');
       const aba = abaSeguroMensal_();
       // Arquivos já renomeados com o nome do técnico na frente: "Manoel-boleto" e "Manoel-comprovante",
       // guardados na pasta do mês (Seguro obrigatório GCM / 11-2026).
       const nome = primeiroNome_(d.tecnico);
       const pasta = pastaSeguroMes_(mesIso);
-      const arqBoleto = salvarArquivoSeguro_(pasta, d.fotoBoletoBase64, nome + '-boleto');
-      const arqComprovante = salvarArquivoSeguro_(pasta, d.fotoComprovanteBase64, nome + '-comprovante');
+      const arqBoleto = salvarArquivoSeguro_(pasta, d.fotoBoletoBase64, nome + '-boleto', d.boletoMime);
+      const arqComprovante = salvarArquivoSeguro_(pasta, d.fotoComprovanteBase64, nome + '-comprovante', d.comprovanteMime);
       const boleto = arqBoleto.getUrl();
       const comprovante = arqComprovante.getUrl();
       aba.appendRow([agora, d.tecnico, d.placa, mesIso, boleto, comprovante]);
@@ -307,13 +311,9 @@ function registrarTipo_(d, t, ss, agora, cfg) {
       if (MEMO_) delete MEMO_[ABA.SEGURO_MENSAL];
       if (cfg.email) {
         const [a, m] = mesIso.split('-');
-        MailApp.sendEmail(cfg.email, `Seguro obrigatório ${m}/${a}: boleto e comprovante de ${d.tecnico} (${d.placa})`,
-          `Prezado Glaydson,\n\nO técnico ${d.tecnico} anexou o boleto e o comprovante de pagamento do seguro obrigatório ` +
-          `do veículo ${d.placa}, referente a ${m}/${a}.\n\nOs dois arquivos seguem anexos a este e-mail:\n` +
-          `- ${arqBoleto.getName()}: ${boleto}\n- ${arqComprovante.getName()}: ${comprovante}\n\n` +
-          `Eles também ficam no Drive, na pasta "${PASTA_SEGURO} / ${m}-${a}", e na aba "${ABA.SEGURO_MENSAL}" da planilha.` +
-          `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`,
-          { attachments: [arqBoleto.getBlob(), arqComprovante.getBlob()] });
+        avisar_('Seguro', d.tecnico, d.placa, agora, `Seguro obrigatório ${m}/${a}: boleto e comprovante enviados (anexos)`,
+          `${arqBoleto.getName()}: ${boleto} | ${arqComprovante.getName()}: ${comprovante} | Drive: ${PASTA_SEGURO} / ${m}-${a}`,
+          [arqBoleto.getId(), arqComprovante.getId()]);
       }
       return { ok: true, seguroMensal: seguroMensal_(d.placa, agora, cfg) };
     }
@@ -401,11 +401,9 @@ function conferirKm_(d, km, agora, cfg) {
   const abaA = ss.getSheetByName(ABA.ALERTAS);
   problemas.forEach(p => abaA.appendRow([agora, d.placa, d.tecnico, km, cfg.email || '', p.tipo]));
   if (cfg.email) {
-    MailApp.sendEmail(cfg.email, `${problemas.map(p => p.tipo).join(' e ')}: ${d.tecnico} (${d.placa})`,
-      `Prezado Glaydson,\n\nO registro de ${d.tipo === 'abastecimento' ? 'abastecimento' : (d.periodo || 'km')} do técnico ` +
-      `${d.tecnico} (veículo ${d.placa}) em ${Utilities.formatDate(agora, TZ, 'dd/MM/yyyy HH:mm')} merece conferência:\n\n` +
-      problemas.map(p => '- ' + p.texto).join('\n') +
-      `\n\nAs fotos do painel e da nota ficam na planilha.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+    avisar_('Km', d.tecnico, d.placa, agora,
+      `${problemas.map(p => p.tipo).join(' e ')} no registro de ${d.tipo === 'abastecimento' ? 'abastecimento' : (d.periodo || 'km')}`,
+      problemas.map(p => p.texto).join(' '));
   }
   return aviso;
 }
@@ -425,13 +423,8 @@ function marcarManutencao_(placa, emManutencao) {
 function avisarManutencao_(placa, tecnico, descricao, agora, cfg) {
   if (!cfg.email) return;
   const s = situacaoVeiculo_(placa) || { placa };
-  MailApp.sendEmail(cfg.email, `Veículo ${placa} em manutenção (informado por ${tecnico})`,
-    `Prezado Glaydson,\n\n` +
-    `O técnico ${tecnico} informou que o veículo ${placa}${s.modelo ? ' - ' + s.modelo : ''} não está funcionando corretamente.\n\n` +
-    `Problema informado: ${descricao || '(não descrito)'}\n` +
-    `Data e hora: ${Utilities.formatDate(agora, TZ, 'dd/MM/yyyy HH:mm')}\n\n` +
-    `O veículo foi marcado como "Em manutenção" na planilha. Quando o técnico confirmar que voltou a funcionar, a marcação é retirada.\n\n` +
-    `Atenciosamente,\nControle de Abastecimento GCM Serviços`);
+  avisar_('Manutenção', tecnico, placa, agora, `Veículo ${placa}${s.modelo ? ' - ' + s.modelo : ''} em manutenção`,
+    `Problema informado: ${descricao || '(não descrito)'}. O veículo foi marcado como "Em manutenção" na planilha.`);
   SpreadsheetApp.getActive().getSheetByName(ABA.ALERTAS).appendRow([agora, placa, tecnico, '', cfg.email, 'Manutenção']);
 }
 
@@ -448,21 +441,16 @@ function avisosPrevistos_(placa, tecnico, agora, cfg) {
   if (m.oleo.situacao === 'Trocar em breve' || m.oleo.situacao === 'Atrasada') {
     const ref = 'Óleo ' + m.oleo.proximaTrocaKm;
     if (!alertas.some(a => a[5] === 'Óleo' && String(a[3]) === ref)) {
-      MailApp.sendEmail(cfg.email, `Troca de óleo do veículo ${placa}`,
-        `Prezado Glaydson,\n\nO veículo ${placa} está próximo da troca de óleo.\n\n` +
-        `Km atual: ${r[V.KM_ATUAL]}\nPróxima troca: ${m.oleo.proximaTrocaKm} km\n` +
-        `Faltam: ${m.oleo.kmFaltando} km\nTécnico responsável: ${tecnico}\n\n` +
-        `Atenciosamente,\nControle de Abastecimento GCM Serviços`);
+      avisar_('Óleo', tecnico, placa, agora, `Troca de óleo ${m.oleo.situacao.toLowerCase()}`,
+        `Km atual ${r[V.KM_ATUAL]}, próxima troca em ${m.oleo.proximaTrocaKm} km (faltam ${m.oleo.kmFaltando} km).`);
       aba.appendRow([agora, placa, tecnico, ref, cfg.email, 'Óleo']);
     }
   }
   if (m.seguro.situacao === 'Vence em breve' || m.seguro.situacao === 'Vencido') {
     const ref = 'Seguro ' + m.seguro.vencimento;
     if (!alertas.some(a => a[5] === 'Seguro' && String(a[3]) === ref)) {
-      MailApp.sendEmail(cfg.email, `Seguro obrigatório do veículo ${placa}`,
-        `Prezado Glaydson,\n\nO seguro obrigatório do veículo ${placa} ` +
-        (m.seguro.diasRestantes < 0 ? `venceu em ${m.seguro.vencimento}.` : `vence em ${m.seguro.vencimento} (faltam ${m.seguro.diasRestantes} dias).`) +
-        `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+      avisar_('Seguro', tecnico, placa, agora, 'Seguro obrigatório ' +
+        (m.seguro.diasRestantes < 0 ? `venceu em ${m.seguro.vencimento}` : `vence em ${m.seguro.vencimento} (faltam ${m.seguro.diasRestantes} dias)`), '');
       aba.appendRow([agora, placa, tecnico, ref, cfg.email, 'Seguro']);
     }
   }
@@ -537,9 +525,95 @@ function enviarAlerta_(s, nomeTecnico, agora) {
     `Km rodados desde então: ${s.kmRodados}\n` +
     `Km restantes estimados: ${s.kmRestantes}\n\n` +
     `Atenciosamente,\nControle de Abastecimento GCM Serviços`;
-  MailApp.sendEmail(destinos, assunto, corpo);
+  avisar_('Combustível', nomeTecnico, s.placa, agora, `Precisa abastecer: restam cerca de ${s.kmRestantes} km`,
+    `Km atual ${s.kmAtual}; abastecido em ${s.kmUltimoAbastecimento} km (coube ${s.kmCoube} km); rodados desde então ${s.kmRodados} km.`,
+    null, { assunto, corpo });
   ss.getSheetByName(ABA.ALERTAS).appendRow([agora, s.placa, nomeTecnico, s.kmRestantes, destinos, 'Combustível']);
   return true;
+}
+
+// ---------------------------------------------------------------- E-mails ao responsável
+/*
+ * Para não lotar a caixa de e-mail, os avisos vão para a aba "Fila de e-mails" e saem
+ * em UM e-mail por técnico por dia (a partir das 18h). Só a categoria abaixo (combustível, 20 km) chega na hora.
+ */
+const EMAIL_IMEDIATO = ['Combustível'];
+const HORA_RESUMO = 18;
+
+/**
+ * Registra um aviso ao responsável. imediato: { assunto, corpo } completos para o envio na hora
+ * (senão é montado a partir do título e do texto). anexos: ids de arquivos do Drive.
+ */
+function avisar_(categoria, tecnico, placa, quando, titulo, texto, anexos, imediato) {
+  const cfg = parametros_();
+  if (!cfg.email) return;
+  if (EMAIL_IMEDIATO.includes(categoria)) {
+    const assunto = (imediato && imediato.assunto) || `${titulo} (${tecnico}, ${placa})`;
+    const corpo = (imediato && imediato.corpo) || `Prezado Glaydson,\n\nTécnico: ${tecnico}\nVeículo: ${placa}\n` +
+      `Data e hora: ${Utilities.formatDate(quando, TZ, 'dd/MM/yyyy HH:mm')}\n\n${titulo}.\n${texto ? texto + '\n' : ''}` +
+      `\nAtenciosamente,\nControle de Abastecimento GCM Serviços`;
+    MailApp.sendEmail(cfg.email, assunto, corpo);
+    return;
+  }
+  abaFilaEmails_().appendRow([quando, tecnico || 'Geral', placa || '', categoria, titulo, texto || '', (anexos || []).join(','), '']);
+}
+
+function abaFilaEmails_() {
+  const ss = SpreadsheetApp.getActive();
+  let aba = ss.getSheetByName(ABA.FILA_EMAILS);
+  if (!aba) {
+    aba = ss.insertSheet(ABA.FILA_EMAILS);
+    aba.appendRow(['Data e hora', 'Técnico', 'Placa', 'Categoria', 'Aviso', 'Detalhes', 'Anexos (ids)', 'Enviado em']);
+    aba.setFrozenRows(1);
+  }
+  return aba;
+}
+
+/**
+ * Envia o resumo do dia: um e-mail por técnico com todos os avisos pendentes.
+ * Roda junto com os acessos ao sistema: a partir das 18h envia os do dia; em qualquer
+ * horário envia os que ficaram de dias anteriores.
+ */
+function resumoEmailsSeDevido_() {
+  const aba = SpreadsheetApp.getActive().getSheetByName(ABA.FILA_EMAILS);
+  if (!aba || aba.getLastRow() < 2) return 0;
+  const agora = new Date();
+  const hoje = Utilities.formatDate(agora, TZ, 'yyyy-MM-dd');
+  const horaAgora = Number(Utilities.formatDate(agora, TZ, 'H'));
+  const valores = aba.getRange(2, 1, aba.getLastRow() - 1, 8).getValues();
+  const pend = valores.map((r, i) => ({ r, linha: i + 2 })).filter(x => x.r[0] && !x.r[7] &&
+    (horaAgora >= HORA_RESUMO || Utilities.formatDate(new Date(x.r[0]), TZ, 'yyyy-MM-dd') < hoje));
+  if (!pend.length) return 0;
+  const cfg = parametros_();
+  if (!cfg.email) return 0;
+  const porTecnico = {};
+  pend.forEach(x => (porTecnico[x.r[1]] = porTecnico[x.r[1]] || []).push(x));
+  let enviados = 0;
+  Object.keys(porTecnico).forEach(tec => {
+    const itens = porTecnico[tec];
+    const placa = itens.map(x => x.r[2]).filter(Boolean)[0] || '';
+    const dias = [...new Set(itens.map(x => Utilities.formatDate(new Date(x.r[0]), TZ, 'dd/MM')))];
+    let corpo = `Prezado Glaydson,\n\nResumo de ${tec}${placa ? ' (' + placa + ')' : ''} em ${dias.join(', ')}:\n\n`;
+    if (tec !== 'Geral' && placa) {
+      try {
+        const h = resumoDia_(tec, placa, new Date(itens[itens.length - 1].r[0]));
+        corpo += `Km rodados no dia: ${h.kmRodados} km · Combustível estimado: R$ ${String(h.gasto.toFixed(2)).replace('.', ',')}\n\n`;
+      } catch (err) { console.error(err); }
+    }
+    corpo += itens.map(x => `- ${Utilities.formatDate(new Date(x.r[0]), TZ, 'HH:mm')} · ${x.r[4]}` + (x.r[5] ? `\n  ${x.r[5]}` : '')).join('\n');
+    corpo += `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`;
+    const anexos = [];
+    itens.forEach(x => String(x.r[6] || '').split(',').filter(Boolean).forEach(id => {
+      try { anexos.push(DriveApp.getFileById(id).getBlob()); } catch (err) { console.error(err); }
+    }));
+    const assunto = `Resumo do dia: ${tec}${placa ? ' (' + placa + ')' : ''} · ${itens.length} aviso(s)`;
+    MailApp.sendEmail(cfg.email, assunto, corpo, anexos.length ? { attachments: anexos } : {});
+    const quando = new Date();
+    itens.forEach(x => aba.getRange(x.linha, 8).setValue(quando));
+    enviados++;
+  });
+  SpreadsheetApp.flush();
+  return enviados;
 }
 
 const PASTA_SEGURO = 'Seguro obrigatório GCM';
@@ -560,11 +634,16 @@ function pastaSeguroMes_(mesIso) {
   return it.hasNext() ? it.next() : raiz.createFolder(nome);
 }
 
-/** Salva a foto com o nome pedido; se já existir no mês (reenvio), acrescenta (2), (3)... */
-function salvarArquivoSeguro_(pasta, base64, base) {
-  let nome = base + '.jpg';
-  for (let i = 2; pasta.getFilesByName(nome).hasNext(); i++) nome = base + ' (' + i + ').jpg';
-  return pasta.createFile(Utilities.newBlob(Utilities.base64Decode(base64), 'image/jpeg', nome));
+/** Tipos de arquivo aceitos no seguro: foto ou PDF. Outros tipos são guardados como JPG (fotos). */
+const TIPOS_SEGURO = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/heic': 'heic', 'application/pdf': 'pdf' };
+
+/** Salva a foto ou o PDF com o nome pedido; se já existir no mês (reenvio), acrescenta (2), (3)... */
+function salvarArquivoSeguro_(pasta, base64, base, mime) {
+  const tipo = TIPOS_SEGURO[String(mime || '').toLowerCase()] ? String(mime).toLowerCase() : 'image/jpeg';
+  const ext = '.' + TIPOS_SEGURO[tipo];
+  let nome = base + ext;
+  for (let i = 2; pasta.getFilesByName(nome).hasNext(); i++) nome = base + ' (' + i + ')' + ext;
+  return pasta.createFile(Utilities.newBlob(Utilities.base64Decode(base64), tipo, nome));
 }
 
 function salvarFoto_(base64, placa, data) {
@@ -718,11 +797,9 @@ function cadastro_(d) {
     const cfg = parametros_();
     if (cfg.email) {
       try {
-        MailApp.sendEmail(cfg.email, `Novo técnico cadastrado: ${nome} (${placaFinal})`,
-          `Prezado Glaydson,\n\n${nome} fez o cadastro no aplicativo de combustível.\n\n` +
-          `Veículo: ${placaFinal}${existe ? ' (já cadastrado)' : ' ' + [d.modelo, d.ano, d.cor].filter(Boolean).join(' · ') + ' (novo)'}\n` +
-          (email ? `E-mail: ${email}\n` : '') +
-          `\nPara desativar, coloque "Não" na coluna "Ativo" da aba Técnicos.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+        avisar_('Cadastro', nome, placaFinal, new Date(), 'Novo cadastro no aplicativo',
+          `Veículo ${placaFinal}${existe ? ' (já cadastrado)' : ' ' + [d.modelo, d.ano, d.cor].filter(Boolean).join(' · ') + ' (novo)'}` +
+          (email ? `, e-mail ${email}` : '') + '. Para desativar, coloque "Não" na coluna "Ativo" da aba Técnicos.');
       } catch (err) { console.error(err); }
     }
     return {
@@ -1352,6 +1429,7 @@ label{font-size:14px;color:var(--suave);font-weight:600}
 .foto{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;height:150px;border-radius:14px;background:var(--laranja-c);border:2px dashed rgba(255,122,18,.6);font-weight:700;cursor:pointer;color:var(--texto)}
 .foto .cam{width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,var(--magenta),var(--laranja));display:flex;align-items:center;justify-content:center;color:#fff;font-size:26px}
 .previa{width:100%;height:210px;object-fit:cover;border-radius:14px}
+.escolher{position:relative;overflow:hidden}.escolher .arquivo{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:200px}
 .item{border-bottom:1px solid var(--linha);padding-bottom:12px;display:grid;gap:8px}.item:last-child{border:0;padding:0}
 .conds{display:flex;gap:6px}.conds button{flex:1;border:2px solid var(--linha);background:#fff;border-radius:12px;padding:10px 4px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--texto)}
 .conds button.ok{background:var(--verde-c);border-color:var(--verde);color:var(--verde)}
@@ -1617,8 +1695,9 @@ function appTecnico_() {
   // ---------------------------------------------------------------- Registro (início, abastecimento, fim)
   function carimbar(arquivo, largura) {
     return new Promise((ok, falha) => {
-      const url = URL.createObjectURL(arquivo);
+      // iPhone: lê a foto como dataURL (o endereço blob: pode falhar dentro da página do Google).
       const img = new Image();
+      let url = '';
       img.onload = () => {
         const esc = Math.min(1, largura / Math.max(img.width, img.height));
         const c = document.createElement('canvas');
@@ -1630,18 +1709,45 @@ function appTecnico_() {
         g.font = 'bold ' + fs + 'px sans-serif';
         g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(0, c.height - fs * 1.8, c.width, fs * 1.8);
         g.fillStyle = '#fff'; g.fillText(t, fs * 0.6, c.height - fs * 0.6);
-        URL.revokeObjectURL(url);
+        if (url) URL.revokeObjectURL(url);
         ok(c.toDataURL('image/jpeg', 0.8));
       };
-      img.onerror = () => falha(new Error('Não foi possível abrir a foto.'));
-      img.src = url;
+      img.onerror = () => falha(new Error('Não foi possível abrir a foto. Tire a foto de novo pela câmera ou escolha outra imagem (JPG ou PNG).'));
+      try {
+        const leitor = new FileReader();
+        leitor.onload = () => { img.src = leitor.result; };
+        leitor.onerror = () => { url = URL.createObjectURL(arquivo); img.src = url; };
+        leitor.readAsDataURL(arquivo);
+      } catch (e) { url = URL.createObjectURL(arquivo); img.src = url; }
+    });
+  }
+
+  /** Seguro: aceita foto ou arquivo (PDF). O PDF aparece como um cartão com o nome do arquivo. */
+  function blocoAnexo(id, rotulo, anexo) {
+    const campo = '<input class="arquivo" type="file" accept="image/*,application/pdf,.pdf" id="arq_' + id + '" data-foto="' + id + '">';
+    if (!anexo) return '<label class="foto escolher">' + campo + '<span class="cam">📎</span>' + E(rotulo) +
+      '<small style="font-weight:400;color:var(--suave)">Tirar foto, escolher da galeria ou um arquivo PDF</small></label>';
+    const previa = anexo.indexOf('data:image') === 0 ? '<img class="previa" src="' + anexo + '" alt="">'
+      : '<div class="aviso" style="display:flex;gap:10px;align-items:center"><span style="font-size:28px">📄</span><b>' + E((estado.nomes && estado.nomes[id]) || 'Arquivo PDF') + '</b></div>';
+    return previa + '<label class="btn contorno escolher">' + campo + '📎 Trocar foto ou arquivo</label>';
+  }
+  /** Lê um arquivo (PDF) como está, sem carimbo. Limite de 10 MB. */
+  function lerArquivo(arquivo) {
+    return new Promise((ok, falha) => {
+      if (arquivo.size > 10 * 1024 * 1024) return falha(new Error('O arquivo passa de 10 MB. Escolha um arquivo menor.'));
+      const leitor = new FileReader();
+      leitor.onload = () => ok(leitor.result);
+      leitor.onerror = () => falha(new Error('Não foi possível abrir o arquivo.'));
+      leitor.readAsDataURL(arquivo);
     });
   }
 
   function blocoFoto(id, rotulo, foto) {
-    return '<input type="file" accept="image/*" capture="environment" id="arq_' + id + '" data-foto="' + id + '" hidden>' +
-      (foto ? '<img class="previa" src="' + foto + '" alt=""><label class="btn contorno" for="arq_' + id + '">📷 Tirar outra foto</label>'
-        : '<label class="foto" for="arq_' + id + '"><span class="cam">📷</span>' + E(rotulo) + '</label>');
+    // O campo de arquivo fica por cima do botão (transparente): é o jeito que funciona em todos os iPhones.
+    // Sem "capture": o iPhone oferece Tirar foto, Fototeca ou Arquivos.
+    const campo = '<input class="arquivo" type="file" accept="image/*" id="arq_' + id + '" data-foto="' + id + '">';
+    return foto ? '<img class="previa" src="' + foto + '" alt=""><label class="btn contorno escolher">' + campo + '📷 Tirar ou escolher outra foto</label>'
+      : '<label class="foto escolher">' + campo + '<span class="cam">📷</span>' + E(rotulo) + '<small style="font-weight:400;color:var(--suave)">Tirar foto ou escolher da galeria</small></label>';
   }
 
   function telaRegistro(i) {
@@ -1674,33 +1780,39 @@ function appTecnico_() {
   raiz.addEventListener('change', ev => {
     const el = ev.target;
     if (!el.dataset || !el.dataset.foto || !el.files || !el.files[0]) return;
+    if (el.dataset.lido === '1') return;
+    el.dataset.lido = '1';
     const desenhar = estado.seguro ? desenharSeguro : desenharRegistro;
     if (!estado.seguro) guardarCampos();
-    carimbar(el.files[0], el.dataset.foto === 'painel' ? 1280 : 1600)
-      .then(d => { estado.fotos[el.dataset.foto] = d; desenhar(); })
+    const f = el.files[0];
+    const ePdf = estado.seguro && (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || ''));
+    (ePdf ? lerArquivo(f).then(d => 'data:application/pdf;base64,' + d.split(',')[1]) : carimbar(f, el.dataset.foto === 'painel' ? 1280 : 1600))
+      .then(d => { estado.fotos[el.dataset.foto] = d; if (estado.nomes) estado.nomes[el.dataset.foto] = ePdf ? f.name : ''; desenhar(); })
       .catch(e => desenhar(e.message));
   });
 
   // ---------------------------------------------------------------- Seguro obrigatório (mensal)
-  ac.seguroMensal = () => { estado = { seguro: true, fotos: {}, r: estado.r, veiculo: estado.veiculo }; desenharSeguro(); };
+  ac.seguroMensal = () => { estado = { seguro: true, fotos: {}, nomes: {}, r: estado.r, veiculo: estado.veiculo }; desenharSeguro(); };
   function desenharSeguro(erro) {
     const s = estado;
     const sm = (s.veiculo && s.veiculo.seguro && s.veiculo.seguro.mensal) || {};
-    let x = '<p class="sub">Todo mês, a partir do dia ' + (sm.dia || 20) + ', anexe a foto do boleto do seguro obrigatório e a do comprovante de pagamento.</p>';
-    x += '<div class="cartao"><h2>1. Boleto</h2>' + blocoFoto('boleto', 'Fotografar ou escolher o boleto', s.fotos.boleto) + '</div>';
-    x += '<div class="cartao"><h2>2. Comprovante de pagamento</h2>' + blocoFoto('comprovante', 'Fotografar ou escolher o comprovante', s.fotos.comprovante) + '</div>';
+    let x = '<p class="sub">Todo mês, a partir do dia ' + (sm.dia || 20) + ', anexe o boleto do seguro obrigatório e o comprovante de pagamento (foto ou arquivo PDF).</p>';
+    x += '<div class="cartao"><h2>1. Boleto</h2>' + blocoAnexo('boleto', 'Anexar o boleto', s.fotos.boleto) + '</div>';
+    x += '<div class="cartao"><h2>2. Comprovante de pagamento</h2>' + blocoAnexo('comprovante', 'Anexar o comprovante', s.fotos.comprovante) + '</div>';
     if (erro) x += '<div class="aviso erro">' + E(erro) + '</div>';
     x += '<button class="btn" data-acao="enviarSeguro" style="padding:20px">✓ Enviar boleto e comprovante</button>';
     tela('Seguro obrigatório', 'Boleto e comprovante' + (sm.mes ? ' de ' + sm.mes : '') + ' · ' + hojeBr(), x, true);
   }
   ac.enviarSeguro = b => {
     const s = estado;
-    if (!s.fotos.boleto) return desenharSeguro('Anexe a foto do boleto.');
-    if (!s.fotos.comprovante) return desenharSeguro('Anexe a foto do comprovante de pagamento.');
+    if (!s.fotos.boleto) return desenharSeguro('Anexe o boleto (foto ou PDF).');
+    if (!s.fotos.comprovante) return desenharSeguro('Anexe o comprovante de pagamento (foto ou PDF).');
+    const mime = d => d.slice(5, d.indexOf(';'));
     const agora = new Date();
     const mes = agora.getFullYear() + '-' + String(agora.getMonth() + 1).padStart(2, '0');
     const corpo = credenciais({ tipo: 'seguro_mensal', mes, quando: Date.now(), id: 'ws' + Date.now() + Math.random().toString(36).slice(2, 8),
-      fotoBoletoBase64: s.fotos.boleto.split(',')[1], fotoComprovanteBase64: s.fotos.comprovante.split(',')[1] });
+      fotoBoletoBase64: s.fotos.boleto.split(',')[1], boletoMime: mime(s.fotos.boleto),
+      fotoComprovanteBase64: s.fotos.comprovante.split(',')[1], comprovanteMime: mime(s.fotos.comprovante) });
     b.disabled = true; b.textContent = 'Enviando...';
     chamar('webRegistrar', corpo).then(() => telaInicio('Boleto e comprovante do seguro obrigatório enviados. Obrigado!'))
       .catch(e => {

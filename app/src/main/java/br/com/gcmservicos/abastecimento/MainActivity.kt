@@ -1009,9 +1009,43 @@ private fun mensagemRetorno(r: JSONObject, etapa: Etapa, kmEnviado: Long?, litro
 
 // ---------------------------------------------------------------- Seguro obrigatório (mensal)
 
+/** Arquivo anexado ao seguro (PDF ou imagem escolhida nos arquivos), enviado como está. */
+private class ArquivoAnexo(val nome: String, val mime: String, val base64: String)
+
+/** Lê um arquivo escolhido pelo técnico. PDFs vão como estão; limite de 10 MB. */
+private fun lerArquivo(ctx: Context, uri: Uri): ArquivoAnexo {
+    val cr = ctx.contentResolver
+    val mime = cr.getType(uri) ?: "application/pdf"
+    var nome = "arquivo"
+    cr.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+        if (c.moveToFirst() && !c.isNull(0)) nome = c.getString(0)
+    }
+    val bytes = cr.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("Arquivo vazio")
+    if (bytes.size > 10 * 1024 * 1024) throw IllegalArgumentException("O arquivo passa de 10 MB. Escolha um arquivo menor.")
+    return ArquivoAnexo(nome, mime, android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
+}
+
+/** Mostra o arquivo anexado (PDF) com a opção de trocar. */
+@Composable
+private fun BlocoArquivo(arq: ArquivoAnexo, ocupado: Boolean, aoTrocar: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(CANTO_CAMPO).background(Cores.LARANJA_CLARO).padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("📄", fontSize = 28.sp)
+        Column(Modifier.weight(1f)) {
+            Text(arq.nome, fontWeight = FontWeight.Bold, color = Cores.TEXTO)
+            Text("Arquivo anexado", color = Cores.SUAVE, fontSize = 13.sp)
+        }
+    }
+    OutlinedButton(onClick = aoTrocar, enabled = !ocupado, shape = CANTO_CAMPO, modifier = Modifier.fillMaxWidth()) {
+        Text("Trocar arquivo")
+    }
+}
+
 /**
- * Boleto e comprovante de pagamento do seguro obrigatório do mês: duas fotos
- * (pela câmera ou escolhidas da galeria), enviadas juntas para a planilha.
+ * Boleto e comprovante de pagamento do seguro obrigatório do mês: foto (câmera ou galeria)
+ * ou arquivo (PDF ou imagem), enviados juntos para a planilha.
  */
 @Composable
 private fun TelaSeguro(prefs: Prefs, aoConcluir: (String) -> Unit) {
@@ -1019,6 +1053,8 @@ private fun TelaSeguro(prefs: Prefs, aoConcluir: (String) -> Unit) {
     val escopo = rememberCoroutineScope()
     var boleto by remember { mutableStateOf<Foto?>(null) }
     var comprovante by remember { mutableStateOf<Foto?>(null) }
+    var boletoArq by remember { mutableStateOf<ArquivoAnexo?>(null) }
+    var comprovanteArq by remember { mutableStateOf<ArquivoAnexo?>(null) }
     var ocupado by remember { mutableStateOf(false) }
     var erro by remember { mutableStateOf<String?>(null) }
 
@@ -1030,33 +1066,59 @@ private fun TelaSeguro(prefs: Prefs, aoConcluir: (String) -> Unit) {
             finally { ocupado = false }
         }
     }
-    val cameraBoleto = rememberCamera { u -> receber(u) { boleto = it } }
-    val cameraComprovante = rememberCamera { u -> receber(u) { comprovante = it } }
-    val galeriaBoleto = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) receber(u) { boleto = it } }
-    val galeriaComprovante = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) receber(u) { comprovante = it } }
+    /** Arquivo escolhido: imagem vira foto (com carimbo); PDF vai como está. */
+    fun receberArquivo(uri: Uri, foto: (Foto) -> Unit, arquivo: (ArquivoAnexo) -> Unit) {
+        val mime = ctx.contentResolver.getType(uri) ?: ""
+        if (mime.startsWith("image/")) { receber(uri, foto); return }
+        ocupado = true; erro = null
+        escopo.launch {
+            try { arquivo(withContext(Dispatchers.IO) { lerArquivo(ctx, uri) }) }
+            catch (e: IllegalArgumentException) { erro = e.message }
+            catch (e: Exception) { erro = "Erro ao abrir o arquivo. Tente novamente." }
+            finally { ocupado = false }
+        }
+    }
+    val cameraBoleto = rememberCamera { u -> receber(u) { boleto = it; boletoArq = null } }
+    val cameraComprovante = rememberCamera { u -> receber(u) { comprovante = it; comprovanteArq = null } }
+    val galeriaBoleto = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) receber(u) { boleto = it; boletoArq = null } }
+    val galeriaComprovante = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) receber(u) { comprovante = it; comprovanteArq = null } }
+    val arquivoBoleto = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
+        if (u != null) receberArquivo(u, { boleto = it; boletoArq = null }, { boletoArq = it; boleto = null })
+    }
+    val arquivoComprovante = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
+        if (u != null) receberArquivo(u, { comprovante = it; comprovanteArq = null }, { comprovanteArq = it; comprovante = null })
+    }
+    val tiposArquivo = arrayOf("application/pdf", "image/*")
 
     Column(Modifier.tela().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text(
-            "Todo mês, a partir do dia ${prefs.seguroDia}, anexe a foto do boleto do seguro obrigatório e a do comprovante de pagamento.",
+            "Todo mês, a partir do dia ${prefs.seguroDia}, anexe o boleto do seguro obrigatório e o comprovante de pagamento (foto ou arquivo PDF).",
             color = Cores.SUAVE, fontSize = 14.sp
         )
         Cartao {
             TituloSecao(1, "Boleto")
-            BlocoFoto("Fotografar o boleto", boleto, ocupado, cameraBoleto)
+            val ba = boletoArq
+            if (ba != null) BlocoArquivo(ba, ocupado) { arquivoBoleto.launch(tiposArquivo) }
+            else BlocoFoto("Fotografar o boleto", boleto, ocupado, cameraBoleto)
             TextButton(onClick = { galeriaBoleto.launch("image/*") }, enabled = !ocupado) { Text("Escolher imagem da galeria") }
+            TextButton(onClick = { arquivoBoleto.launch(tiposArquivo) }, enabled = !ocupado) { Text("Escolher arquivo (PDF)") }
         }
         Cartao {
             TituloSecao(2, "Comprovante de pagamento")
-            BlocoFoto("Fotografar o comprovante", comprovante, ocupado, cameraComprovante)
+            val ca = comprovanteArq
+            if (ca != null) BlocoArquivo(ca, ocupado) { arquivoComprovante.launch(tiposArquivo) }
+            else BlocoFoto("Fotografar o comprovante", comprovante, ocupado, cameraComprovante)
             TextButton(onClick = { galeriaComprovante.launch("image/*") }, enabled = !ocupado) { Text("Escolher imagem da galeria") }
+            TextButton(onClick = { arquivoComprovante.launch(tiposArquivo) }, enabled = !ocupado) { Text("Escolher arquivo (PDF)") }
         }
         if (ocupado) LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = Cores.MAGENTA)
         erro?.let { Erro(it) }
         BotaoMarca(
             if (ocupado) "Enviando..." else "Enviar boleto e comprovante",
             onClick = {
-                val b = boleto ?: return@BotaoMarca
-                val c = comprovante ?: return@BotaoMarca
+                val b = boleto; val bArq = boletoArq
+                val c = comprovante; val cArq = comprovanteArq
+                if ((b == null && bArq == null) || (c == null && cArq == null)) return@BotaoMarca
                 ocupado = true; erro = null
                 escopo.launch {
                     var corpo: JSONObject? = null
@@ -1067,8 +1129,10 @@ private fun TelaSeguro(prefs: Prefs, aoConcluir: (String) -> Unit) {
                             .put("mes", SimpleDateFormat("yyyy-MM", BR).format(Date()))
                             .put("quando", System.currentTimeMillis())
                             .put("id", "s" + System.currentTimeMillis() + "_" + (1000..9999).random())
-                            .put("fotoBoletoBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(b.bitmap, 1600) })
-                            .put("fotoComprovanteBase64", withContext(Dispatchers.Default) { Imagem.paraBase64(c.bitmap, 1600) })
+                            .put("fotoBoletoBase64", bArq?.base64 ?: withContext(Dispatchers.Default) { Imagem.paraBase64(b!!.bitmap, 1600) })
+                            .put("boletoMime", bArq?.mime ?: "image/jpeg")
+                            .put("fotoComprovanteBase64", cArq?.base64 ?: withContext(Dispatchers.Default) { Imagem.paraBase64(c!!.bitmap, 1600) })
+                            .put("comprovanteMime", cArq?.mime ?: "image/jpeg")
                         val r = Api.enviar(prefs.url, corpo)
                         r.optJSONObject("seguroMensal")?.let { prefs.salvarSeguro(JSONObject().put("mensal", it)) }
                         aoConcluir("Boleto e comprovante do seguro obrigatório enviados. Obrigado!")
@@ -1083,7 +1147,7 @@ private fun TelaSeguro(prefs: Prefs, aoConcluir: (String) -> Unit) {
                     } finally { ocupado = false }
                 }
             },
-            habilitado = !ocupado && boleto != null && comprovante != null,
+            habilitado = !ocupado && (boleto != null || boletoArq != null) && (comprovante != null || comprovanteArq != null),
             altura = 64.dp,
             icone = { Icon(Icons.Filled.Check, contentDescription = null, tint = Color.White) }
         )
