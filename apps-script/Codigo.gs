@@ -26,6 +26,7 @@ const ABA = {
   ITENS: 'Itens dos check-lists',
   CHECKLISTS: 'Check-lists',
   SEGURO_MENSAL: 'Seguro mensal',
+  FILA_EMAILS: 'Fila de e-mails',
 };
 const CHECKLISTS = ['Segurança do veículo', 'Ferramental e EPI'];
 const TZ = 'America/Sao_Paulo';
@@ -52,7 +53,13 @@ function doGet(e) {
 
 /** Consulta usada pelo app Android (GET) e pela versão web (iPhone). */
 function consultar_(p) {
-  return comMemo_(() => consultarDados_(p));
+  const r = comMemo_(() => consultarDados_(p));
+  // Resumo diário de e-mails também sai quando os técnicos só consultam o app.
+  const lock = LockService.getScriptLock();
+  if (lock.tryLock(3000)) {
+    try { resumoEmailsSeDevido_(); } catch (err) { console.error(err); } finally { lock.releaseLock(); }
+  }
+  return r;
 }
 function consultarDados_(p) {
   // Os nomes dos técnicos não são mais divulgados (cada técnico só vê os próprios dados).
@@ -224,6 +231,7 @@ function registrar_(d) {
     const resp = registrarTipo_(d, t, ss, agora, cfg);
     if (idReg && resp && resp.ok) cache.put(idReg, '1', 21600);
     try { relatorioMensalSeDevido_(); } catch (err) { console.error(err); }
+    try { resumoEmailsSeDevido_(); } catch (err) { console.error(err); }
     return resp;
   } catch (err) {
     return { ok: false, erro: String(err) };
@@ -263,10 +271,8 @@ function registrarTipo_(d, t, ss, agora, cfg) {
       aba.getRange(aba.getLastRow() + 1, 1, linhas.length, 7).setValues(linhas);
       const problemas = itens.filter(i => i.condicao && i.condicao !== 'OK');
       if (problemas.length && cfg.email) {
-        MailApp.sendEmail(cfg.email, `Check-list ${nome}: ${problemas.length} item(ns) com problema (${d.tecnico})`,
-          `Prezado Glaydson,\n\nO técnico ${d.tecnico} (veículo ${d.placa}) preencheu o check-list "${nome}" e apontou:\n\n` +
-          problemas.map(i => `- ${i.item}: ${i.condicao}${i.observacao ? ' (' + i.observacao + ')' : ''}`).join('\n') +
-          `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+        avisar_('Check-list', d.tecnico, d.placa, agora, `Check-list "${nome}": ${problemas.length} item(ns) com problema`,
+          problemas.map(i => `${i.item}: ${i.condicao}${i.observacao ? ' (' + i.observacao + ')' : ''}`).join('; '));
         ss.getSheetByName(ABA.ALERTAS).appendRow([agora, d.placa, d.tecnico, nome, cfg.email, 'Check-list']);
       }
       SpreadsheetApp.flush();
@@ -282,9 +288,7 @@ function registrarTipo_(d, t, ss, agora, cfg) {
       ss.getSheetByName(ABA.VEICULOS).getRange(linha, V.OLEO_AGENDADA + 1).setValue(data);
       SpreadsheetApp.flush();
       if (cfg.email) {
-        MailApp.sendEmail(cfg.email, `Troca de óleo agendada: ${d.placa} em ${dataBr_(data)}`,
-          `Prezado Glaydson,\n\nO técnico ${d.tecnico} agendou a troca de óleo do veículo ${d.placa} para ${dataBr_(data)}.\n\n` +
-          `Atenciosamente,\nControle de Abastecimento GCM Serviços`);
+        avisar_('Óleo', d.tecnico, d.placa, agora, `Troca de óleo agendada para ${dataBr_(data)}`, '');
       }
       const r = linhas_(ss.getSheetByName(ABA.VEICULOS)).find(l => l[V.PLACA] === d.placa);
       return { ok: true, veiculo: veiculoJson_(r, cfg) };
@@ -307,13 +311,9 @@ function registrarTipo_(d, t, ss, agora, cfg) {
       if (MEMO_) delete MEMO_[ABA.SEGURO_MENSAL];
       if (cfg.email) {
         const [a, m] = mesIso.split('-');
-        MailApp.sendEmail(cfg.email, `Seguro obrigatório ${m}/${a}: boleto e comprovante de ${d.tecnico} (${d.placa})`,
-          `Prezado Glaydson,\n\nO técnico ${d.tecnico} anexou o boleto e o comprovante de pagamento do seguro obrigatório ` +
-          `do veículo ${d.placa}, referente a ${m}/${a}.\n\nOs dois arquivos seguem anexos a este e-mail:\n` +
-          `- ${arqBoleto.getName()}: ${boleto}\n- ${arqComprovante.getName()}: ${comprovante}\n\n` +
-          `Eles também ficam no Drive, na pasta "${PASTA_SEGURO} / ${m}-${a}", e na aba "${ABA.SEGURO_MENSAL}" da planilha.` +
-          `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`,
-          { attachments: [arqBoleto.getBlob(), arqComprovante.getBlob()] });
+        avisar_('Seguro', d.tecnico, d.placa, agora, `Seguro obrigatório ${m}/${a}: boleto e comprovante enviados (anexos)`,
+          `${arqBoleto.getName()}: ${boleto} | ${arqComprovante.getName()}: ${comprovante} | Drive: ${PASTA_SEGURO} / ${m}-${a}`,
+          [arqBoleto.getId(), arqComprovante.getId()]);
       }
       return { ok: true, seguroMensal: seguroMensal_(d.placa, agora, cfg) };
     }
@@ -401,11 +401,9 @@ function conferirKm_(d, km, agora, cfg) {
   const abaA = ss.getSheetByName(ABA.ALERTAS);
   problemas.forEach(p => abaA.appendRow([agora, d.placa, d.tecnico, km, cfg.email || '', p.tipo]));
   if (cfg.email) {
-    MailApp.sendEmail(cfg.email, `${problemas.map(p => p.tipo).join(' e ')}: ${d.tecnico} (${d.placa})`,
-      `Prezado Glaydson,\n\nO registro de ${d.tipo === 'abastecimento' ? 'abastecimento' : (d.periodo || 'km')} do técnico ` +
-      `${d.tecnico} (veículo ${d.placa}) em ${Utilities.formatDate(agora, TZ, 'dd/MM/yyyy HH:mm')} merece conferência:\n\n` +
-      problemas.map(p => '- ' + p.texto).join('\n') +
-      `\n\nAs fotos do painel e da nota ficam na planilha.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+    avisar_('Km', d.tecnico, d.placa, agora,
+      `${problemas.map(p => p.tipo).join(' e ')} no registro de ${d.tipo === 'abastecimento' ? 'abastecimento' : (d.periodo || 'km')}`,
+      problemas.map(p => p.texto).join(' '));
   }
   return aviso;
 }
@@ -425,13 +423,8 @@ function marcarManutencao_(placa, emManutencao) {
 function avisarManutencao_(placa, tecnico, descricao, agora, cfg) {
   if (!cfg.email) return;
   const s = situacaoVeiculo_(placa) || { placa };
-  MailApp.sendEmail(cfg.email, `Veículo ${placa} em manutenção (informado por ${tecnico})`,
-    `Prezado Glaydson,\n\n` +
-    `O técnico ${tecnico} informou que o veículo ${placa}${s.modelo ? ' - ' + s.modelo : ''} não está funcionando corretamente.\n\n` +
-    `Problema informado: ${descricao || '(não descrito)'}\n` +
-    `Data e hora: ${Utilities.formatDate(agora, TZ, 'dd/MM/yyyy HH:mm')}\n\n` +
-    `O veículo foi marcado como "Em manutenção" na planilha. Quando o técnico confirmar que voltou a funcionar, a marcação é retirada.\n\n` +
-    `Atenciosamente,\nControle de Abastecimento GCM Serviços`);
+  avisar_('Manutenção', tecnico, placa, agora, `Veículo ${placa}${s.modelo ? ' - ' + s.modelo : ''} em manutenção`,
+    `Problema informado: ${descricao || '(não descrito)'}. O veículo foi marcado como "Em manutenção" na planilha.`);
   SpreadsheetApp.getActive().getSheetByName(ABA.ALERTAS).appendRow([agora, placa, tecnico, '', cfg.email, 'Manutenção']);
 }
 
@@ -448,21 +441,16 @@ function avisosPrevistos_(placa, tecnico, agora, cfg) {
   if (m.oleo.situacao === 'Trocar em breve' || m.oleo.situacao === 'Atrasada') {
     const ref = 'Óleo ' + m.oleo.proximaTrocaKm;
     if (!alertas.some(a => a[5] === 'Óleo' && String(a[3]) === ref)) {
-      MailApp.sendEmail(cfg.email, `Troca de óleo do veículo ${placa}`,
-        `Prezado Glaydson,\n\nO veículo ${placa} está próximo da troca de óleo.\n\n` +
-        `Km atual: ${r[V.KM_ATUAL]}\nPróxima troca: ${m.oleo.proximaTrocaKm} km\n` +
-        `Faltam: ${m.oleo.kmFaltando} km\nTécnico responsável: ${tecnico}\n\n` +
-        `Atenciosamente,\nControle de Abastecimento GCM Serviços`);
+      avisar_('Óleo', tecnico, placa, agora, `Troca de óleo ${m.oleo.situacao.toLowerCase()}`,
+        `Km atual ${r[V.KM_ATUAL]}, próxima troca em ${m.oleo.proximaTrocaKm} km (faltam ${m.oleo.kmFaltando} km).`);
       aba.appendRow([agora, placa, tecnico, ref, cfg.email, 'Óleo']);
     }
   }
   if (m.seguro.situacao === 'Vence em breve' || m.seguro.situacao === 'Vencido') {
     const ref = 'Seguro ' + m.seguro.vencimento;
     if (!alertas.some(a => a[5] === 'Seguro' && String(a[3]) === ref)) {
-      MailApp.sendEmail(cfg.email, `Seguro obrigatório do veículo ${placa}`,
-        `Prezado Glaydson,\n\nO seguro obrigatório do veículo ${placa} ` +
-        (m.seguro.diasRestantes < 0 ? `venceu em ${m.seguro.vencimento}.` : `vence em ${m.seguro.vencimento} (faltam ${m.seguro.diasRestantes} dias).`) +
-        `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+      avisar_('Seguro', tecnico, placa, agora, 'Seguro obrigatório ' +
+        (m.seguro.diasRestantes < 0 ? `venceu em ${m.seguro.vencimento}` : `vence em ${m.seguro.vencimento} (faltam ${m.seguro.diasRestantes} dias)`), '');
       aba.appendRow([agora, placa, tecnico, ref, cfg.email, 'Seguro']);
     }
   }
@@ -537,9 +525,95 @@ function enviarAlerta_(s, nomeTecnico, agora) {
     `Km rodados desde então: ${s.kmRodados}\n` +
     `Km restantes estimados: ${s.kmRestantes}\n\n` +
     `Atenciosamente,\nControle de Abastecimento GCM Serviços`;
-  MailApp.sendEmail(destinos, assunto, corpo);
+  avisar_('Combustível', nomeTecnico, s.placa, agora, `Precisa abastecer: restam cerca de ${s.kmRestantes} km`,
+    `Km atual ${s.kmAtual}; abastecido em ${s.kmUltimoAbastecimento} km (coube ${s.kmCoube} km); rodados desde então ${s.kmRodados} km.`,
+    null, { assunto, corpo });
   ss.getSheetByName(ABA.ALERTAS).appendRow([agora, s.placa, nomeTecnico, s.kmRestantes, destinos, 'Combustível']);
   return true;
+}
+
+// ---------------------------------------------------------------- E-mails ao responsável
+/*
+ * Para não lotar a caixa de e-mail, os avisos vão para a aba "Fila de e-mails" e saem
+ * em UM e-mail por técnico por dia (a partir das 18h). Só as categorias abaixo chegam na hora.
+ */
+const EMAIL_IMEDIATO = ['Combustível', 'Manutenção'];
+const HORA_RESUMO = 18;
+
+/**
+ * Registra um aviso ao responsável. imediato: { assunto, corpo } completos para o envio na hora
+ * (senão é montado a partir do título e do texto). anexos: ids de arquivos do Drive.
+ */
+function avisar_(categoria, tecnico, placa, quando, titulo, texto, anexos, imediato) {
+  const cfg = parametros_();
+  if (!cfg.email) return;
+  if (EMAIL_IMEDIATO.includes(categoria)) {
+    const assunto = (imediato && imediato.assunto) || `${titulo} (${tecnico}, ${placa})`;
+    const corpo = (imediato && imediato.corpo) || `Prezado Glaydson,\n\nTécnico: ${tecnico}\nVeículo: ${placa}\n` +
+      `Data e hora: ${Utilities.formatDate(quando, TZ, 'dd/MM/yyyy HH:mm')}\n\n${titulo}.\n${texto ? texto + '\n' : ''}` +
+      `\nAtenciosamente,\nControle de Abastecimento GCM Serviços`;
+    MailApp.sendEmail(cfg.email, assunto, corpo);
+    return;
+  }
+  abaFilaEmails_().appendRow([quando, tecnico || 'Geral', placa || '', categoria, titulo, texto || '', (anexos || []).join(','), '']);
+}
+
+function abaFilaEmails_() {
+  const ss = SpreadsheetApp.getActive();
+  let aba = ss.getSheetByName(ABA.FILA_EMAILS);
+  if (!aba) {
+    aba = ss.insertSheet(ABA.FILA_EMAILS);
+    aba.appendRow(['Data e hora', 'Técnico', 'Placa', 'Categoria', 'Aviso', 'Detalhes', 'Anexos (ids)', 'Enviado em']);
+    aba.setFrozenRows(1);
+  }
+  return aba;
+}
+
+/**
+ * Envia o resumo do dia: um e-mail por técnico com todos os avisos pendentes.
+ * Roda junto com os acessos ao sistema: a partir das 18h envia os do dia; em qualquer
+ * horário envia os que ficaram de dias anteriores.
+ */
+function resumoEmailsSeDevido_() {
+  const aba = SpreadsheetApp.getActive().getSheetByName(ABA.FILA_EMAILS);
+  if (!aba || aba.getLastRow() < 2) return 0;
+  const agora = new Date();
+  const hoje = Utilities.formatDate(agora, TZ, 'yyyy-MM-dd');
+  const horaAgora = Number(Utilities.formatDate(agora, TZ, 'H'));
+  const valores = aba.getRange(2, 1, aba.getLastRow() - 1, 8).getValues();
+  const pend = valores.map((r, i) => ({ r, linha: i + 2 })).filter(x => x.r[0] && !x.r[7] &&
+    (horaAgora >= HORA_RESUMO || Utilities.formatDate(new Date(x.r[0]), TZ, 'yyyy-MM-dd') < hoje));
+  if (!pend.length) return 0;
+  const cfg = parametros_();
+  if (!cfg.email) return 0;
+  const porTecnico = {};
+  pend.forEach(x => (porTecnico[x.r[1]] = porTecnico[x.r[1]] || []).push(x));
+  let enviados = 0;
+  Object.keys(porTecnico).forEach(tec => {
+    const itens = porTecnico[tec];
+    const placa = itens.map(x => x.r[2]).filter(Boolean)[0] || '';
+    const dias = [...new Set(itens.map(x => Utilities.formatDate(new Date(x.r[0]), TZ, 'dd/MM')))];
+    let corpo = `Prezado Glaydson,\n\nResumo de ${tec}${placa ? ' (' + placa + ')' : ''} em ${dias.join(', ')}:\n\n`;
+    if (tec !== 'Geral' && placa) {
+      try {
+        const h = resumoDia_(tec, placa, new Date(itens[itens.length - 1].r[0]));
+        corpo += `Km rodados no dia: ${h.kmRodados} km · Combustível estimado: R$ ${String(h.gasto.toFixed(2)).replace('.', ',')}\n\n`;
+      } catch (err) { console.error(err); }
+    }
+    corpo += itens.map(x => `- ${Utilities.formatDate(new Date(x.r[0]), TZ, 'HH:mm')} · ${x.r[4]}` + (x.r[5] ? `\n  ${x.r[5]}` : '')).join('\n');
+    corpo += `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`;
+    const anexos = [];
+    itens.forEach(x => String(x.r[6] || '').split(',').filter(Boolean).forEach(id => {
+      try { anexos.push(DriveApp.getFileById(id).getBlob()); } catch (err) { console.error(err); }
+    }));
+    const assunto = `Resumo do dia: ${tec}${placa ? ' (' + placa + ')' : ''} · ${itens.length} aviso(s)`;
+    MailApp.sendEmail(cfg.email, assunto, corpo, anexos.length ? { attachments: anexos } : {});
+    const quando = new Date();
+    itens.forEach(x => aba.getRange(x.linha, 8).setValue(quando));
+    enviados++;
+  });
+  SpreadsheetApp.flush();
+  return enviados;
 }
 
 const PASTA_SEGURO = 'Seguro obrigatório GCM';
@@ -718,11 +792,9 @@ function cadastro_(d) {
     const cfg = parametros_();
     if (cfg.email) {
       try {
-        MailApp.sendEmail(cfg.email, `Novo técnico cadastrado: ${nome} (${placaFinal})`,
-          `Prezado Glaydson,\n\n${nome} fez o cadastro no aplicativo de combustível.\n\n` +
-          `Veículo: ${placaFinal}${existe ? ' (já cadastrado)' : ' ' + [d.modelo, d.ano, d.cor].filter(Boolean).join(' · ') + ' (novo)'}\n` +
-          (email ? `E-mail: ${email}\n` : '') +
-          `\nPara desativar, coloque "Não" na coluna "Ativo" da aba Técnicos.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+        avisar_('Cadastro', nome, placaFinal, new Date(), 'Novo cadastro no aplicativo',
+          `Veículo ${placaFinal}${existe ? ' (já cadastrado)' : ' ' + [d.modelo, d.ano, d.cor].filter(Boolean).join(' · ') + ' (novo)'}` +
+          (email ? `, e-mail ${email}` : '') + '. Para desativar, coloque "Não" na coluna "Ativo" da aba Técnicos.');
       } catch (err) { console.error(err); }
     }
     return {
