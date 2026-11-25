@@ -1424,6 +1424,7 @@ label{font-size:14px;color:var(--suave);font-weight:600}
 .foto{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;height:150px;border-radius:14px;background:var(--laranja-c);border:2px dashed rgba(255,122,18,.6);font-weight:700;cursor:pointer;color:var(--texto)}
 .foto .cam{width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,var(--magenta),var(--laranja));display:flex;align-items:center;justify-content:center;color:#fff;font-size:26px}
 .previa{width:100%;height:210px;object-fit:cover;border-radius:14px}
+.escolher{position:relative;overflow:hidden}.escolher .arquivo{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:200px}
 .item{border-bottom:1px solid var(--linha);padding-bottom:12px;display:grid;gap:8px}.item:last-child{border:0;padding:0}
 .conds{display:flex;gap:6px}.conds button{flex:1;border:2px solid var(--linha);background:#fff;border-radius:12px;padding:10px 4px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--texto)}
 .conds button.ok{background:var(--verde-c);border-color:var(--verde);color:var(--verde)}
@@ -1689,8 +1690,9 @@ function appTecnico_() {
   // ---------------------------------------------------------------- Registro (início, abastecimento, fim)
   function carimbar(arquivo, largura) {
     return new Promise((ok, falha) => {
-      const url = URL.createObjectURL(arquivo);
+      // iPhone: lê a foto como dataURL (o endereço blob: pode falhar dentro da página do Google).
       const img = new Image();
+      let url = '';
       img.onload = () => {
         const esc = Math.min(1, largura / Math.max(img.width, img.height));
         const c = document.createElement('canvas');
@@ -1702,18 +1704,25 @@ function appTecnico_() {
         g.font = 'bold ' + fs + 'px sans-serif';
         g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(0, c.height - fs * 1.8, c.width, fs * 1.8);
         g.fillStyle = '#fff'; g.fillText(t, fs * 0.6, c.height - fs * 0.6);
-        URL.revokeObjectURL(url);
+        if (url) URL.revokeObjectURL(url);
         ok(c.toDataURL('image/jpeg', 0.8));
       };
-      img.onerror = () => falha(new Error('Não foi possível abrir a foto.'));
-      img.src = url;
+      img.onerror = () => falha(new Error('Não foi possível abrir a foto. Tire a foto de novo pela câmera ou escolha outra imagem (JPG ou PNG).'));
+      try {
+        const leitor = new FileReader();
+        leitor.onload = () => { img.src = leitor.result; };
+        leitor.onerror = () => { url = URL.createObjectURL(arquivo); img.src = url; };
+        leitor.readAsDataURL(arquivo);
+      } catch (e) { url = URL.createObjectURL(arquivo); img.src = url; }
     });
   }
 
   function blocoFoto(id, rotulo, foto) {
-    return '<input type="file" accept="image/*" capture="environment" id="arq_' + id + '" data-foto="' + id + '" hidden>' +
-      (foto ? '<img class="previa" src="' + foto + '" alt=""><label class="btn contorno" for="arq_' + id + '">📷 Tirar outra foto</label>'
-        : '<label class="foto" for="arq_' + id + '"><span class="cam">📷</span>' + E(rotulo) + '</label>');
+    // O campo de arquivo fica por cima do botão (transparente): é o jeito que funciona em todos os iPhones.
+    // Sem "capture": o iPhone oferece Tirar foto, Fototeca ou Arquivos.
+    const campo = '<input class="arquivo" type="file" accept="image/*" id="arq_' + id + '" data-foto="' + id + '">';
+    return foto ? '<img class="previa" src="' + foto + '" alt=""><label class="btn contorno escolher">' + campo + '📷 Tirar ou escolher outra foto</label>'
+      : '<label class="foto escolher">' + campo + '<span class="cam">📷</span>' + E(rotulo) + '<small style="font-weight:400;color:var(--suave)">Tirar foto ou escolher da galeria</small></label>';
   }
 
   function telaRegistro(i) {
@@ -1746,6 +1755,8 @@ function appTecnico_() {
   raiz.addEventListener('change', ev => {
     const el = ev.target;
     if (!el.dataset || !el.dataset.foto || !el.files || !el.files[0]) return;
+    if (el.dataset.lido === '1') return;
+    el.dataset.lido = '1';
     const desenhar = estado.seguro ? desenharSeguro : desenharRegistro;
     if (!estado.seguro) guardarCampos();
     carimbar(el.files[0], el.dataset.foto === 'painel' ? 1280 : 1600)
