@@ -514,47 +514,26 @@ function enviarAlerta_(s, nomeTecnico, agora) {
   const destinos = String(config_().getRange('B4').getValue()).trim();
   if (!destinos) return false;
 
-  const assunto = `O técnico ${nomeTecnico} precisa abastecer (${s.placa})`;
-  const corpo =
-    `Prezado Glaydson,\n\n` +
-    `O técnico ${nomeTecnico} precisa abastecer o veículo ${s.placa}` +
-    `${s.modelo ? ' - ' + s.modelo : ''}${s.cor ? ' (' + s.cor + ')' : ''}.\n\n` +
-    `Km atual: ${s.kmAtual}\n` +
-    `Km no último abastecimento: ${s.kmUltimoAbastecimento}\n` +
-    `Km que couberam no tanque: ${s.kmCoube}\n` +
-    `Km rodados desde então: ${s.kmRodados}\n` +
-    `Km restantes estimados: ${s.kmRestantes}\n\n` +
-    `Atenciosamente,\nControle de Abastecimento GCM Serviços`;
   avisar_('Combustível', nomeTecnico, s.placa, agora, `Precisa abastecer: restam cerca de ${s.kmRestantes} km`,
     `Km atual ${s.kmAtual}; abastecido em ${s.kmUltimoAbastecimento} km (coube ${s.kmCoube} km); rodados desde então ${s.kmRodados} km.`,
-    null, { assunto, corpo });
+    null);
   ss.getSheetByName(ABA.ALERTAS).appendRow([agora, s.placa, nomeTecnico, s.kmRestantes, destinos, 'Combustível']);
   return true;
 }
 
 // ---------------------------------------------------------------- E-mails ao responsável
 /*
- * Para não lotar a caixa de e-mail, os avisos vão para a aba "Fila de e-mails" e saem
- * em UM e-mail por técnico por dia (a partir das 18h). Só a categoria abaixo (combustível, 20 km) chega na hora.
+ * Nenhum e-mail sai na hora. Os avisos vão para a aba "Fila de e-mails" e o responsável recebe
+ * UM ÚNICO e-mail por dia, a partir das 18h, com o resumo de todas as atividades do app,
+ * técnico por técnico. O relatório mensal continua separado.
  */
-const EMAIL_IMEDIATO = ['Combustível'];
+const EMAIL_IMEDIATO = [];
 const HORA_RESUMO = 18;
 
-/**
- * Registra um aviso ao responsável. imediato: { assunto, corpo } completos para o envio na hora
- * (senão é montado a partir do título e do texto). anexos: ids de arquivos do Drive.
- */
-function avisar_(categoria, tecnico, placa, quando, titulo, texto, anexos, imediato) {
+/** Registra um aviso ao responsável na fila do resumo diário. anexos: ids de arquivos do Drive. */
+function avisar_(categoria, tecnico, placa, quando, titulo, texto, anexos) {
   const cfg = parametros_();
   if (!cfg.email) return;
-  if (EMAIL_IMEDIATO.includes(categoria)) {
-    const assunto = (imediato && imediato.assunto) || `${titulo} (${tecnico}, ${placa})`;
-    const corpo = (imediato && imediato.corpo) || `Prezado Glaydson,\n\nTécnico: ${tecnico}\nVeículo: ${placa}\n` +
-      `Data e hora: ${Utilities.formatDate(quando, TZ, 'dd/MM/yyyy HH:mm')}\n\n${titulo}.\n${texto ? texto + '\n' : ''}` +
-      `\nAtenciosamente,\nControle de Abastecimento GCM Serviços`;
-    MailApp.sendEmail(cfg.email, assunto, corpo);
-    return;
-  }
   abaFilaEmails_().appendRow([quando, tecnico || 'Geral', placa || '', categoria, titulo, texto || '', (anexos || []).join(','), '']);
 }
 
@@ -570,50 +549,98 @@ function abaFilaEmails_() {
 }
 
 /**
- * Envia o resumo do dia: um e-mail por técnico com todos os avisos pendentes.
- * Roda junto com os acessos ao sistema: a partir das 18h envia os do dia; em qualquer
- * horário envia os que ficaram de dias anteriores.
+ * Envia o resumo diário único. Roda junto com os acessos ao sistema: a partir das 18h envia o
+ * do dia; se ninguém usar o app depois das 18h, o resumo sai no primeiro acesso do dia seguinte.
  */
 function resumoEmailsSeDevido_() {
-  const aba = SpreadsheetApp.getActive().getSheetByName(ABA.FILA_EMAILS);
-  if (!aba || aba.getLastRow() < 2) return 0;
-  const agora = new Date();
-  const hoje = Utilities.formatDate(agora, TZ, 'yyyy-MM-dd');
-  const horaAgora = Number(Utilities.formatDate(agora, TZ, 'H'));
-  const valores = aba.getRange(2, 1, aba.getLastRow() - 1, 8).getValues();
-  const pend = valores.map((r, i) => ({ r, linha: i + 2 })).filter(x => x.r[0] && !x.r[7] &&
-    (horaAgora >= HORA_RESUMO || Utilities.formatDate(new Date(x.r[0]), TZ, 'yyyy-MM-dd') < hoje));
-  if (!pend.length) return 0;
   const cfg = parametros_();
   if (!cfg.email) return 0;
-  const porTecnico = {};
-  pend.forEach(x => (porTecnico[x.r[1]] = porTecnico[x.r[1]] || []).push(x));
-  let enviados = 0;
-  Object.keys(porTecnico).forEach(tec => {
-    const itens = porTecnico[tec];
-    const placa = itens.map(x => x.r[2]).filter(Boolean)[0] || '';
-    const dias = [...new Set(itens.map(x => Utilities.formatDate(new Date(x.r[0]), TZ, 'dd/MM')))];
-    let corpo = `Prezado Glaydson,\n\nResumo de ${tec}${placa ? ' (' + placa + ')' : ''} em ${dias.join(', ')}:\n\n`;
-    if (tec !== 'Geral' && placa) {
+  const props = PropertiesService.getScriptProperties();
+  const agora = new Date();
+  const fmt = d => Utilities.formatDate(d, TZ, 'yyyy-MM-dd');
+  const hoje = fmt(agora);
+  const ultimoDia = Number(Utilities.formatDate(agora, TZ, 'H')) >= HORA_RESUMO ? hoje : fmt(new Date(agora.getTime() - 864e5));
+  let enviado = props.getProperty('resumoDiarioEnviado');
+  if (!enviado) { enviado = fmt(new Date(agora.getTime() - 864e5)); props.setProperty('resumoDiarioEnviado', enviado); }
+  let n = 0;
+  for (let i = 6; i >= 0; i--) {
+    const dia = new Date(agora.getTime() - i * 864e5);
+    const iso = fmt(dia);
+    if (iso <= enviado || iso > ultimoDia) continue;
+    enviarResumoDiario_(dia, cfg);
+    props.setProperty('resumoDiarioEnviado', iso);
+    n++;
+  }
+  return n;
+}
+
+/** Monta e envia o e-mail do dia: atividades de cada técnico e os avisos da fila (com anexos). */
+function enviarResumoDiario_(dia, cfg) {
+  const ss = SpreadsheetApp.getActive();
+  const iso = Utilities.formatDate(dia, TZ, 'yyyy-MM-dd');
+  const doDia = r => r[0] && Utilities.formatDate(new Date(r[0]), TZ, 'yyyy-MM-dd') === iso;
+  const hora = r => Utilities.formatDate(new Date(r[0]), TZ, 'HH:mm');
+  const reais = v => 'R$ ' + Number(v || 0).toFixed(2).replace('.', ',');
+  const leit = linhas_(ss.getSheetByName(ABA.LEITURAS)).filter(doDia);
+  const abast = linhas_(ss.getSheetByName(ABA.ABASTECIMENTOS)).filter(doDia);
+  const aba = ss.getSheetByName(ABA.FILA_EMAILS);
+  const fila = aba && aba.getLastRow() > 1
+    ? aba.getRange(2, 1, aba.getLastRow() - 1, 8).getValues().map((r, i) => ({ r, linha: i + 2 }))
+      .filter(x => x.r[0] && !x.r[7] && Utilities.formatDate(new Date(x.r[0]), TZ, 'yyyy-MM-dd') <= iso)
+    : [];
+  const ativos = linhas_(ss.getSheetByName(ABA.TECNICOS)).filter(r => r[0] && String(r[3]).toLowerCase() !== 'não');
+  const nomes = [...new Set(leit.map(r => r[1]).concat(abast.map(r => r[1]), fila.map(x => x.r[1])).filter(Boolean))];
+  const placaDe = nome => ((leit.concat(abast).find(r => r[1] === nome) || [])[2]) ||
+    ((fila.find(x => x.r[1] === nome && x.r[2]) || { r: [] }).r[2]) || ((ativos.find(t => t[0] === nome) || [])[2]) || '';
+
+  const linhasTxt = [];
+  let html = `<p>Prezado Glaydson,</p><p>Segue o resumo de todas as atividades do aplicativo em <b>${Utilities.formatDate(dia, TZ, 'dd/MM/yyyy')}</b>.</p>`;
+  let kmTotal = 0, gastoTotal = 0, abastTotal = 0;
+  nomes.sort((a, b) => a === 'Geral' ? 1 : b === 'Geral' ? -1 : a.localeCompare(b)).forEach(nome => {
+    const placa = placaDe(nome);
+    const itens = [];
+    if (nome !== 'Geral') {
+      leit.filter(r => r[1] === nome).forEach(r => itens.push([hora(r), `${r[4] || 'Leitura de km'}: ${r[3]} km`]));
+      abast.filter(r => r[1] === nome).forEach(r => {
+        abastTotal += Number(r[4]) || 0;
+        itens.push([hora(r), `Abastecimento: ${reais(r[4])}${Number(r[5]) ? ', ' + String(r[5]).replace('.', ',') + ' litros' : ''}, km ${r[3]}`]);
+      });
+    }
+    fila.filter(x => x.r[1] === nome).forEach(x => {
+      const d = Utilities.formatDate(new Date(x.r[0]), TZ, 'yyyy-MM-dd') === iso ? hora(x.r) : Utilities.formatDate(new Date(x.r[0]), TZ, 'dd/MM HH:mm');
+      itens.push([d, `⚠ ${x.r[3]}: ${x.r[4]}` + (x.r[5] ? ` (${x.r[5]})` : '')]);
+    });
+    itens.sort((a, b) => a[0] < b[0] ? -1 : 1);
+    let cab = nome === 'Geral' ? 'Avisos gerais' : `${nome}${placa ? ' · ' + placa : ''}`;
+    if (nome !== 'Geral' && placa) {
       try {
-        const h = resumoDia_(tec, placa, new Date(itens[itens.length - 1].r[0]));
-        corpo += `Km rodados no dia: ${h.kmRodados} km · Combustível estimado: R$ ${String(h.gasto.toFixed(2)).replace('.', ',')}\n\n`;
+        const h = resumoDia_(nome, placa, dia);
+        kmTotal += h.kmRodados; gastoTotal += h.gasto;
+        cab += ` · ${h.kmRodados} km rodados · combustível estimado ${reais(h.gasto)}`;
       } catch (err) { console.error(err); }
     }
-    corpo += itens.map(x => `- ${Utilities.formatDate(new Date(x.r[0]), TZ, 'HH:mm')} · ${x.r[4]}` + (x.r[5] ? `\n  ${x.r[5]}` : '')).join('\n');
-    corpo += `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`;
-    const anexos = [];
-    itens.forEach(x => String(x.r[6] || '').split(',').filter(Boolean).forEach(id => {
-      try { anexos.push(DriveApp.getFileById(id).getBlob()); } catch (err) { console.error(err); }
-    }));
-    const assunto = `Resumo do dia: ${tec}${placa ? ' (' + placa + ')' : ''} · ${itens.length} aviso(s)`;
-    MailApp.sendEmail(cfg.email, assunto, corpo, anexos.length ? { attachments: anexos } : {});
-    const quando = new Date();
-    itens.forEach(x => aba.getRange(x.linha, 8).setValue(quando));
-    enviados++;
+    html += `<h3 style="margin:18px 0 6px">${cab}</h3><ul style="margin:0">` +
+      itens.map(i => `<li>${i[0]} · ${String(i[1]).replace(/</g, '&lt;')}</li>`).join('') + '</ul>';
+    linhasTxt.push(cab, ...itens.map(i => `- ${i[0]} · ${i[1]}`), '');
   });
+  const semRegistro = ativos.map(t => t[0]).filter(n => !nomes.includes(n));
+  if (!nomes.length) html += '<p>Nenhuma atividade registrada no aplicativo neste dia.</p>';
+  if (semRegistro.length) html += `<p style="color:#b45309"><b>Sem registro no dia:</b> ${semRegistro.join(', ')}</p>`;
+  html += `<p><b>Total do dia:</b> ${kmTotal} km rodados · combustível estimado ${reais(gastoTotal)} · abastecido ${reais(abastTotal)}</p>` +
+    '<p>Atenciosamente,<br>Controle de Abastecimento GCM Serviços</p>';
+  const texto = `Prezado Glaydson,\n\nResumo de ${Utilities.formatDate(dia, TZ, 'dd/MM/yyyy')}:\n\n` + linhasTxt.join('\n') +
+    (semRegistro.length ? `\nSem registro no dia: ${semRegistro.join(', ')}\n` : '') +
+    `\nTotal: ${kmTotal} km · combustível estimado ${reais(gastoTotal)} · abastecido ${reais(abastTotal)}\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`;
+  const anexos = [];
+  fila.forEach(x => String(x.r[6] || '').split(',').filter(Boolean).forEach(id => {
+    try { anexos.push(DriveApp.getFileById(id).getBlob()); } catch (err) { console.error(err); }
+  }));
+  const avisos = fila.length ? ` · ${fila.length} aviso(s)` : '';
+  MailApp.sendEmail({ to: cfg.email, subject: `Resumo do dia ${Utilities.formatDate(dia, TZ, 'dd/MM/yyyy')} · GCM Serviços${avisos}`,
+    body: texto, htmlBody: html, attachments: anexos });
+  const quando = new Date();
+  fila.forEach(x => aba.getRange(x.linha, 8).setValue(quando));
   SpreadsheetApp.flush();
-  return enviados;
 }
 
 const PASTA_SEGURO = 'Seguro obrigatório GCM';
