@@ -294,8 +294,14 @@ function registrarTipo_(d, t, ss, agora, cfg) {
       if (!d.fotoBoletoBase64 || !d.fotoComprovanteBase64) return { ok: false, erro: 'Anexe a foto do boleto e a do comprovante de pagamento.' };
       const mesIso = /^\d{4}-\d{2}$/.test(String(d.mes || '')) ? String(d.mes) : Utilities.formatDate(agora, TZ, 'yyyy-MM');
       const aba = abaSeguroMensal_();
-      const boleto = salvarFoto_(d.fotoBoletoBase64, d.placa + '_seguro_boleto', agora);
-      const comprovante = salvarFoto_(d.fotoComprovanteBase64, d.placa + '_seguro_comprovante', agora);
+      // Arquivos já renomeados com o nome do técnico na frente: "Manoel-boleto" e "Manoel-comprovante",
+      // guardados na pasta do mês (Seguro obrigatório GCM / 11-2026).
+      const nome = primeiroNome_(d.tecnico);
+      const pasta = pastaSeguroMes_(mesIso);
+      const arqBoleto = salvarArquivoSeguro_(pasta, d.fotoBoletoBase64, nome + '-boleto');
+      const arqComprovante = salvarArquivoSeguro_(pasta, d.fotoComprovanteBase64, nome + '-comprovante');
+      const boleto = arqBoleto.getUrl();
+      const comprovante = arqComprovante.getUrl();
       aba.appendRow([agora, d.tecnico, d.placa, mesIso, boleto, comprovante]);
       SpreadsheetApp.flush();
       if (MEMO_) delete MEMO_[ABA.SEGURO_MENSAL];
@@ -303,8 +309,11 @@ function registrarTipo_(d, t, ss, agora, cfg) {
         const [a, m] = mesIso.split('-');
         MailApp.sendEmail(cfg.email, `Seguro obrigatório ${m}/${a}: boleto e comprovante de ${d.tecnico} (${d.placa})`,
           `Prezado Glaydson,\n\nO técnico ${d.tecnico} anexou o boleto e o comprovante de pagamento do seguro obrigatório ` +
-          `do veículo ${d.placa}, referente a ${m}/${a}.\n\nBoleto: ${boleto}\nComprovante: ${comprovante}\n\n` +
-          `Os arquivos também ficam na aba "${ABA.SEGURO_MENSAL}" da planilha.\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`);
+          `do veículo ${d.placa}, referente a ${m}/${a}.\n\nOs dois arquivos seguem anexos a este e-mail:\n` +
+          `- ${arqBoleto.getName()}: ${boleto}\n- ${arqComprovante.getName()}: ${comprovante}\n\n` +
+          `Eles também ficam no Drive, na pasta "${PASTA_SEGURO} / ${m}-${a}", e na aba "${ABA.SEGURO_MENSAL}" da planilha.` +
+          `\n\nAtenciosamente,\nControle de Abastecimento GCM Serviços`,
+          { attachments: [arqBoleto.getBlob(), arqComprovante.getBlob()] });
       }
       return { ok: true, seguroMensal: seguroMensal_(d.placa, agora, cfg) };
     }
@@ -531,6 +540,31 @@ function enviarAlerta_(s, nomeTecnico, agora) {
   MailApp.sendEmail(destinos, assunto, corpo);
   ss.getSheetByName(ABA.ALERTAS).appendRow([agora, s.placa, nomeTecnico, s.kmRestantes, destinos, 'Combustível']);
   return true;
+}
+
+const PASTA_SEGURO = 'Seguro obrigatório GCM';
+
+/** Primeiro nome do técnico com a inicial maiúscula ("manoel pedro" vira "Manoel"). */
+function primeiroNome_(nome) {
+  const p = String(nome || 'Tecnico').trim().split(/\s+/)[0].toLowerCase();
+  return p.charAt(0).toUpperCase() + p.slice(1);
+}
+
+/** Pasta do mês dentro de "Seguro obrigatório GCM" (ex.: 11-2026), criada se não existir. */
+function pastaSeguroMes_(mesIso) {
+  const raizes = DriveApp.getFoldersByName(PASTA_SEGURO);
+  const raiz = raizes.hasNext() ? raizes.next() : DriveApp.createFolder(PASTA_SEGURO);
+  const [a, m] = mesIso.split('-');
+  const nome = m + '-' + a;
+  const it = raiz.getFoldersByName(nome);
+  return it.hasNext() ? it.next() : raiz.createFolder(nome);
+}
+
+/** Salva a foto com o nome pedido; se já existir no mês (reenvio), acrescenta (2), (3)... */
+function salvarArquivoSeguro_(pasta, base64, base) {
+  let nome = base + '.jpg';
+  for (let i = 2; pasta.getFilesByName(nome).hasNext(); i++) nome = base + ' (' + i + ').jpg';
+  return pasta.createFile(Utilities.newBlob(Utilities.base64Decode(base64), 'image/jpeg', nome));
 }
 
 function salvarFoto_(base64, placa, data) {
