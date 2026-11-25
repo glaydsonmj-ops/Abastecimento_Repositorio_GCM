@@ -295,15 +295,15 @@ function registrarTipo_(d, t, ss, agora, cfg) {
     }
 
     if (d.tipo === 'seguro_mensal') {
-      if (!d.fotoBoletoBase64 || !d.fotoComprovanteBase64) return { ok: false, erro: 'Anexe a foto do boleto e a do comprovante de pagamento.' };
+      if (!d.fotoBoletoBase64 || !d.fotoComprovanteBase64) return { ok: false, erro: 'Anexe o boleto e o comprovante de pagamento (foto ou PDF).' };
       const mesIso = /^\d{4}-\d{2}$/.test(String(d.mes || '')) ? String(d.mes) : Utilities.formatDate(agora, TZ, 'yyyy-MM');
       const aba = abaSeguroMensal_();
       // Arquivos já renomeados com o nome do técnico na frente: "Manoel-boleto" e "Manoel-comprovante",
       // guardados na pasta do mês (Seguro obrigatório GCM / 11-2026).
       const nome = primeiroNome_(d.tecnico);
       const pasta = pastaSeguroMes_(mesIso);
-      const arqBoleto = salvarArquivoSeguro_(pasta, d.fotoBoletoBase64, nome + '-boleto');
-      const arqComprovante = salvarArquivoSeguro_(pasta, d.fotoComprovanteBase64, nome + '-comprovante');
+      const arqBoleto = salvarArquivoSeguro_(pasta, d.fotoBoletoBase64, nome + '-boleto', d.boletoMime);
+      const arqComprovante = salvarArquivoSeguro_(pasta, d.fotoComprovanteBase64, nome + '-comprovante', d.comprovanteMime);
       const boleto = arqBoleto.getUrl();
       const comprovante = arqComprovante.getUrl();
       aba.appendRow([agora, d.tecnico, d.placa, mesIso, boleto, comprovante]);
@@ -634,11 +634,16 @@ function pastaSeguroMes_(mesIso) {
   return it.hasNext() ? it.next() : raiz.createFolder(nome);
 }
 
-/** Salva a foto com o nome pedido; se já existir no mês (reenvio), acrescenta (2), (3)... */
-function salvarArquivoSeguro_(pasta, base64, base) {
-  let nome = base + '.jpg';
-  for (let i = 2; pasta.getFilesByName(nome).hasNext(); i++) nome = base + ' (' + i + ').jpg';
-  return pasta.createFile(Utilities.newBlob(Utilities.base64Decode(base64), 'image/jpeg', nome));
+/** Tipos de arquivo aceitos no seguro: foto ou PDF. Outros tipos são guardados como JPG (fotos). */
+const TIPOS_SEGURO = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/heic': 'heic', 'application/pdf': 'pdf' };
+
+/** Salva a foto ou o PDF com o nome pedido; se já existir no mês (reenvio), acrescenta (2), (3)... */
+function salvarArquivoSeguro_(pasta, base64, base, mime) {
+  const tipo = TIPOS_SEGURO[String(mime || '').toLowerCase()] ? String(mime).toLowerCase() : 'image/jpeg';
+  const ext = '.' + TIPOS_SEGURO[tipo];
+  let nome = base + ext;
+  for (let i = 2; pasta.getFilesByName(nome).hasNext(); i++) nome = base + ' (' + i + ')' + ext;
+  return pasta.createFile(Utilities.newBlob(Utilities.base64Decode(base64), tipo, nome));
 }
 
 function salvarFoto_(base64, placa, data) {
@@ -1717,6 +1722,26 @@ function appTecnico_() {
     });
   }
 
+  /** Seguro: aceita foto ou arquivo (PDF). O PDF aparece como um cartão com o nome do arquivo. */
+  function blocoAnexo(id, rotulo, anexo) {
+    const campo = '<input class="arquivo" type="file" accept="image/*,application/pdf,.pdf" id="arq_' + id + '" data-foto="' + id + '">';
+    if (!anexo) return '<label class="foto escolher">' + campo + '<span class="cam">📎</span>' + E(rotulo) +
+      '<small style="font-weight:400;color:var(--suave)">Tirar foto, escolher da galeria ou um arquivo PDF</small></label>';
+    const previa = anexo.indexOf('data:image') === 0 ? '<img class="previa" src="' + anexo + '" alt="">'
+      : '<div class="aviso" style="display:flex;gap:10px;align-items:center"><span style="font-size:28px">📄</span><b>' + E((estado.nomes && estado.nomes[id]) || 'Arquivo PDF') + '</b></div>';
+    return previa + '<label class="btn contorno escolher">' + campo + '📎 Trocar foto ou arquivo</label>';
+  }
+  /** Lê um arquivo (PDF) como está, sem carimbo. Limite de 10 MB. */
+  function lerArquivo(arquivo) {
+    return new Promise((ok, falha) => {
+      if (arquivo.size > 10 * 1024 * 1024) return falha(new Error('O arquivo passa de 10 MB. Escolha um arquivo menor.'));
+      const leitor = new FileReader();
+      leitor.onload = () => ok(leitor.result);
+      leitor.onerror = () => falha(new Error('Não foi possível abrir o arquivo.'));
+      leitor.readAsDataURL(arquivo);
+    });
+  }
+
   function blocoFoto(id, rotulo, foto) {
     // O campo de arquivo fica por cima do botão (transparente): é o jeito que funciona em todos os iPhones.
     // Sem "capture": o iPhone oferece Tirar foto, Fototeca ou Arquivos.
@@ -1759,31 +1784,35 @@ function appTecnico_() {
     el.dataset.lido = '1';
     const desenhar = estado.seguro ? desenharSeguro : desenharRegistro;
     if (!estado.seguro) guardarCampos();
-    carimbar(el.files[0], el.dataset.foto === 'painel' ? 1280 : 1600)
-      .then(d => { estado.fotos[el.dataset.foto] = d; desenhar(); })
+    const f = el.files[0];
+    const ePdf = estado.seguro && (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || ''));
+    (ePdf ? lerArquivo(f).then(d => 'data:application/pdf;base64,' + d.split(',')[1]) : carimbar(f, el.dataset.foto === 'painel' ? 1280 : 1600))
+      .then(d => { estado.fotos[el.dataset.foto] = d; if (estado.nomes) estado.nomes[el.dataset.foto] = ePdf ? f.name : ''; desenhar(); })
       .catch(e => desenhar(e.message));
   });
 
   // ---------------------------------------------------------------- Seguro obrigatório (mensal)
-  ac.seguroMensal = () => { estado = { seguro: true, fotos: {}, r: estado.r, veiculo: estado.veiculo }; desenharSeguro(); };
+  ac.seguroMensal = () => { estado = { seguro: true, fotos: {}, nomes: {}, r: estado.r, veiculo: estado.veiculo }; desenharSeguro(); };
   function desenharSeguro(erro) {
     const s = estado;
     const sm = (s.veiculo && s.veiculo.seguro && s.veiculo.seguro.mensal) || {};
-    let x = '<p class="sub">Todo mês, a partir do dia ' + (sm.dia || 20) + ', anexe a foto do boleto do seguro obrigatório e a do comprovante de pagamento.</p>';
-    x += '<div class="cartao"><h2>1. Boleto</h2>' + blocoFoto('boleto', 'Fotografar ou escolher o boleto', s.fotos.boleto) + '</div>';
-    x += '<div class="cartao"><h2>2. Comprovante de pagamento</h2>' + blocoFoto('comprovante', 'Fotografar ou escolher o comprovante', s.fotos.comprovante) + '</div>';
+    let x = '<p class="sub">Todo mês, a partir do dia ' + (sm.dia || 20) + ', anexe o boleto do seguro obrigatório e o comprovante de pagamento (foto ou arquivo PDF).</p>';
+    x += '<div class="cartao"><h2>1. Boleto</h2>' + blocoAnexo('boleto', 'Anexar o boleto', s.fotos.boleto) + '</div>';
+    x += '<div class="cartao"><h2>2. Comprovante de pagamento</h2>' + blocoAnexo('comprovante', 'Anexar o comprovante', s.fotos.comprovante) + '</div>';
     if (erro) x += '<div class="aviso erro">' + E(erro) + '</div>';
     x += '<button class="btn" data-acao="enviarSeguro" style="padding:20px">✓ Enviar boleto e comprovante</button>';
     tela('Seguro obrigatório', 'Boleto e comprovante' + (sm.mes ? ' de ' + sm.mes : '') + ' · ' + hojeBr(), x, true);
   }
   ac.enviarSeguro = b => {
     const s = estado;
-    if (!s.fotos.boleto) return desenharSeguro('Anexe a foto do boleto.');
-    if (!s.fotos.comprovante) return desenharSeguro('Anexe a foto do comprovante de pagamento.');
+    if (!s.fotos.boleto) return desenharSeguro('Anexe o boleto (foto ou PDF).');
+    if (!s.fotos.comprovante) return desenharSeguro('Anexe o comprovante de pagamento (foto ou PDF).');
+    const mime = d => d.slice(5, d.indexOf(';'));
     const agora = new Date();
     const mes = agora.getFullYear() + '-' + String(agora.getMonth() + 1).padStart(2, '0');
     const corpo = credenciais({ tipo: 'seguro_mensal', mes, quando: Date.now(), id: 'ws' + Date.now() + Math.random().toString(36).slice(2, 8),
-      fotoBoletoBase64: s.fotos.boleto.split(',')[1], fotoComprovanteBase64: s.fotos.comprovante.split(',')[1] });
+      fotoBoletoBase64: s.fotos.boleto.split(',')[1], boletoMime: mime(s.fotos.boleto),
+      fotoComprovanteBase64: s.fotos.comprovante.split(',')[1], comprovanteMime: mime(s.fotos.comprovante) });
     b.disabled = true; b.textContent = 'Enviando...';
     chamar('webRegistrar', corpo).then(() => telaInicio('Boleto e comprovante do seguro obrigatório enviados. Obrigado!'))
       .catch(e => {
