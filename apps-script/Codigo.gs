@@ -535,9 +535,9 @@ function enviarAlerta_(s, nomeTecnico, agora) {
 // ---------------------------------------------------------------- E-mails ao responsável
 /*
  * Para não lotar a caixa de e-mail, os avisos vão para a aba "Fila de e-mails" e saem
- * em UM e-mail por técnico por dia (a partir das 18h). Só as categorias abaixo chegam na hora.
+ * em UM e-mail por técnico por dia (a partir das 18h). Só a categoria abaixo (combustível, 20 km) chega na hora.
  */
-const EMAIL_IMEDIATO = ['Combustível', 'Manutenção'];
+const EMAIL_IMEDIATO = ['Combustível'];
 const HORA_RESUMO = 18;
 
 /**
